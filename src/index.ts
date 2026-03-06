@@ -1,0 +1,860 @@
+#!/usr/bin/env node
+import { Command } from 'commander'
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
+import * as tar from 'tar'
+import { createWriteStream, createReadStream } from 'fs'
+import { pipeline } from 'stream/promises'
+import { createGzip, createGunzip } from 'zlib'
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
+const PKG_VERSION: string = require('../package.json').version
+
+const CONFIG_DIR = path.join(os.homedir(), '.clawpack')
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
+const DEFAULT_REGISTRY = 'https://clawpack.io'
+
+interface RuntimeConfig {
+  provider?: string
+  apiKey?: string
+  model?: string
+  runtime?: string // e.g. "openclaw@latest", "nullclaw@0.2.0"
+}
+
+interface Config {
+  apiKey?: string
+  registry?: string
+  runtime?: RuntimeConfig
+}
+
+function loadConfig(): Config {
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'))
+  } catch {
+    return {}
+  }
+}
+
+function saveConfig(config: Config) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2))
+}
+
+function getRegistry(): string {
+  return process.env.CLAWPACK_REGISTRY || loadConfig().registry || DEFAULT_REGISTRY
+}
+
+function getApiKey(): string | undefined {
+  return process.env.CLAWPACK_API_KEY || loadConfig().apiKey
+}
+
+async function apiRequest(method: string, endpoint: string, body?: any, isForm?: boolean): Promise<any> {
+  const registry = getRegistry()
+  const apiKey = getApiKey()
+  const headers: Record<string, string> = {}
+
+  if (apiKey) headers['x-api-key'] = apiKey
+  if (!isForm && body) headers['content-type'] = 'application/json'
+
+  const res = await fetch(`${registry}/api${endpoint}`, {
+    method,
+    headers,
+    body: isForm ? body : body ? JSON.stringify(body) : undefined,
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(err.error || `HTTP ${res.status}`)
+  }
+
+  return res.json()
+}
+
+const program = new Command()
+
+program
+  .name('clawpack')
+  .description('ClawPack — the agent registry')
+  .version(PKG_VERSION, '-V, --version')
+
+// LOGIN
+program
+  .command('login')
+  .description('Authenticate with ClawPack')
+  .option('--api-key <key>', 'API key')
+  .option('--registry <url>', 'Registry URL')
+  .action(async (opts) => {
+    const config = loadConfig()
+
+    if (opts.apiKey) {
+      config.apiKey = opts.apiKey
+    } else {
+      // Interactive prompt
+      process.stdout.write('API Key: ')
+      const key = await new Promise<string>((resolve) => {
+        let data = ''
+        process.stdin.setEncoding('utf-8')
+        process.stdin.on('data', (chunk) => {
+          data += chunk
+          if (data.includes('\n')) {
+            process.stdin.pause()
+            resolve(data.trim())
+          }
+        })
+        process.stdin.resume()
+      })
+      config.apiKey = key
+    }
+
+    if (opts.registry) config.registry = opts.registry
+
+    saveConfig(config)
+    console.log(`✅ Logged in to ${getRegistry()}`)
+    console.log(`   Config saved to ${CONFIG_FILE}`)
+  })
+
+// WHOAMI
+program
+  .command('whoami')
+  .description('Show current user')
+  .action(async () => {
+    try {
+      const data = await apiRequest('GET', '/v1/auth/me')
+      console.log(`Logged in as: ${data.email || data.name || 'unknown'}`)
+    } catch (err: any) {
+      console.error(`Not logged in or invalid key: ${err.message}`)
+      process.exit(1)
+    }
+  })
+
+// PUSH
+program
+  .command('push [path]')
+  .description('Publish an agent bundle')
+  .option('--public', 'Make bundle public (default)', true)
+  .option('--private', 'Make bundle private')
+  .option('--org <slug>', 'Publish under an organization')
+  .option('--changelog <text>', 'Version changelog')
+  .action(async (bundlePath: string | undefined, opts) => {
+    const dir = path.resolve(bundlePath || '.')
+    const manifestPath = path.join(dir, 'manifest.json')
+
+    if (!fs.existsSync(manifestPath)) {
+      console.error(`❌ No manifest.json found in ${dir}`)
+      console.error('   Create one with: clawpack init')
+      process.exit(1)
+    }
+
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
+    console.log(`📦 Pushing ${manifest.name}@${manifest.version}...`)
+
+    // Create tarball
+    const tmpFile = path.join(os.tmpdir(), `clawpack-${Date.now()}.tar.gz`)
+    const excludePatterns = manifest.exclude || [
+      'node_modules', '*.log', '.git', '.env', '.env.*', '__pycache__', '.DS_Store'
+    ]
+
+    await tar.create(
+      {
+        gzip: true,
+        file: tmpFile,
+        cwd: path.dirname(dir),
+        filter: (p: string) => {
+          return !excludePatterns.some((pattern: string) => {
+            if (pattern.startsWith('*.')) {
+              return p.endsWith(pattern.slice(1))
+            }
+            return p.includes(pattern)
+          })
+        },
+      },
+      [path.basename(dir)]
+    )
+
+    const tarball = fs.readFileSync(tmpFile)
+    const sizeMb = (tarball.length / 1024 / 1024).toFixed(1)
+    console.log(`   Bundle size: ${sizeMb} MB`)
+
+    // Upload
+    const formData = new FormData()
+    formData.append('tarball', new Blob([tarball]), `${manifest.name}.tar.gz`)
+    formData.append('is_public', opts.private ? 'false' : 'true')
+    if (opts.changelog) formData.append('changelog', opts.changelog)
+    if (opts.org) formData.append('org', opts.org)
+
+    // Auto-detect and send README content
+    const readmeCandidates = ['README.md', 'readme.md', 'SOUL.md']
+    for (const candidate of readmeCandidates) {
+      const readmePath = path.join(dir, candidate)
+      if (fs.existsSync(readmePath)) {
+        const content = fs.readFileSync(readmePath, 'utf-8')
+        formData.append('readme', content)
+        break
+      }
+    }
+
+    try {
+      const result = await apiRequest('POST', '/v1/bundles/publish', formData, true)
+      console.log(`✅ Published ${result.owner}/${result.slug}@${result.version}`)
+      console.log(`   Checksum: ${result.checksum?.slice(0, 12)}...`)
+      console.log(`   Install:  clawpack pull ${result.owner}/${result.slug}`)
+    } catch (err: any) {
+      console.error(`❌ Push failed: ${err.message}`)
+      process.exit(1)
+    } finally {
+      fs.unlinkSync(tmpFile)
+    }
+  })
+
+// PULL
+program
+  .command('pull <bundle>')
+  .description('Download an agent bundle (owner/slug[@version])')
+  .option('--dir <path>', 'Extract to directory', '.')
+  .option('--link', 'Register agent in OpenClaw after pulling')
+  .option('--provider <name>', 'Provider for --link auth')
+  .option('--api-key <key>', 'API key for --link auth')
+  .option('--model <model>', 'Model for --link')
+  .option('--name <name>', 'Agent name override for --link')
+  .action(async (bundle: string, opts) => {
+    const match = bundle.match(/^([^/]+)\/([^@]+)(?:@(.+))?$/)
+    if (!match) {
+      console.error('❌ Invalid bundle format. Use: owner/slug[@version]')
+      process.exit(1)
+    }
+
+    const [, owner, slug, version] = match
+    const ver = version || 'latest'
+
+    console.log(`📥 Pulling ${owner}/${slug}@${ver}...`)
+
+    try {
+      const { url, version: resolvedVersion } = await apiRequest(
+        'GET',
+        `/v1/bundles/${owner}/${slug}/${ver}/download`
+      )
+
+      console.log(`   Version: ${resolvedVersion}`)
+
+      // Download tarball
+      const res = await fetch(url)
+      if (!res.ok) throw new Error(`Download failed: ${res.statusText}`)
+
+      const tarball = Buffer.from(await res.arrayBuffer())
+      const targetDir = path.resolve(opts.dir, slug)
+      const bundlesCacheDir = path.join(os.homedir(), '.clawpack', 'bundles', owner, slug)
+
+      // Extract to both target dir and bundles cache
+      fs.mkdirSync(targetDir, { recursive: true })
+      fs.mkdirSync(bundlesCacheDir, { recursive: true })
+      const tmpFile = path.join(os.tmpdir(), `clawpack-pull-${Date.now()}.tar.gz`)
+      fs.writeFileSync(tmpFile, tarball)
+
+      await tar.extract({
+        file: tmpFile,
+        cwd: targetDir,
+        strip: 1,
+      })
+
+      await tar.extract({
+        file: tmpFile,
+        cwd: bundlesCacheDir,
+        strip: 1,
+      })
+
+      fs.unlinkSync(tmpFile)
+      console.log(`✅ Extracted to ${targetDir}`)
+
+      // Link if requested
+      if (opts.link) {
+        const { linkAgent } = await import('./link.js')
+        linkAgent(targetDir, {
+          name: opts.name,
+          provider: opts.provider,
+          apiKey: opts.apiKey,
+          model: opts.model,
+        })
+      }
+    } catch (err: any) {
+      console.error(`❌ Pull failed: ${err.message}`)
+      process.exit(1)
+    }
+  })
+
+// SEARCH
+program
+  .command('search <query>')
+  .description('Search for agent bundles')
+  .option('--limit <n>', 'Max results', '10')
+  .action(async (query: string, opts) => {
+    try {
+      const { bundles, total } = await apiRequest(
+        'GET',
+        `/v1/bundles?q=${encodeURIComponent(query)}&limit=${opts.limit}`
+      )
+
+      if (!bundles.length) {
+        console.log('No bundles found.')
+        return
+      }
+
+      console.log(`Found ${total} bundle(s):\n`)
+      for (const b of bundles) {
+        const stars = b.star_count ? `⭐${b.star_count}` : ''
+        const downloads = b.download_count ? `📥${b.download_count}` : ''
+        const tags = b.tags?.length ? b.tags.map((t: string) => `#${t}`).join(' ') : ''
+        console.log(`  ${b.owner}/${b.slug} ${stars} ${downloads}`)
+        if (b.description) console.log(`    ${b.description}`)
+        if (tags) console.log(`    ${tags}`)
+        console.log()
+      }
+    } catch (err: any) {
+      console.error(`❌ Search failed: ${err.message}`)
+      process.exit(1)
+    }
+  })
+
+// LIST
+program
+  .command('list')
+  .description('List your published bundles')
+  .action(async () => {
+    try {
+      // This requires knowing the user's owner slug - use whoami first
+      const me = await apiRequest('GET', '/v1/auth/me').catch(() => null)
+      if (!me) {
+        console.error('Not logged in. Run: clawpack login')
+        process.exit(1)
+      }
+
+      const { bundles } = await apiRequest('GET', `/v1/bundles?owner=${encodeURIComponent(me.slug || me.name)}&limit=100`)
+      if (!bundles?.length) {
+        console.log('No bundles published yet. Push your first agent with: clawpack push')
+        return
+      }
+
+      console.log('Your bundles:\n')
+      for (const b of bundles) {
+        const visibility = b.is_public ? '🌍' : '🔒'
+        console.log(`  ${visibility} ${b.owner}/${b.slug} ⭐${b.star_count} 📥${b.download_count}`)
+      }
+    } catch (err: any) {
+      console.error(`❌ ${err.message}`)
+      process.exit(1)
+    }
+  })
+
+// INIT
+program
+  .command('init')
+  .description('Create a manifest.json for your agent')
+  .action(async () => {
+    const manifestPath = path.join(process.cwd(), 'manifest.json')
+    if (fs.existsSync(manifestPath)) {
+      console.log('manifest.json already exists.')
+      return
+    }
+
+    const dirName = path.basename(process.cwd()).toLowerCase().replace(/[^a-z0-9-]/g, '-')
+    const manifest = {
+      name: dirName,
+      version: '0.1.0',
+      description: '',
+      author: '',
+      tags: [],
+    }
+
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+    console.log(`✅ Created manifest.json`)
+    console.log(`   Edit it, then run: clawpack push`)
+  })
+
+// CREDENTIALS
+const credentials = program
+  .command('credentials')
+  .description('Manage runtime credentials for clawpack run')
+
+credentials
+  .command('set')
+  .description('Configure provider credentials for running agents')
+  .option('--provider <name>', 'Provider name (e.g. github-copilot, openai, anthropic)')
+  .option('--api-key <key>', 'Provider API key')
+  .option('--model <model>', 'Default model (e.g. github-copilot/claude-sonnet-4)')
+  .option('--runtime <runtime>', 'Runtime to use (e.g. openclaw@latest, nullclaw@latest)', 'openclaw@latest')
+  .action(async (opts) => {
+    const config = loadConfig()
+    config.runtime = config.runtime || {}
+
+    if (opts.provider) config.runtime.provider = opts.provider
+    if (opts.apiKey) config.runtime.apiKey = opts.apiKey
+    if (opts.model) config.runtime.model = opts.model
+    if (opts.runtime) config.runtime.runtime = opts.runtime
+
+    if (!opts.provider && !opts.apiKey && !opts.model) {
+      // Interactive
+      const ask = (prompt: string): Promise<string> => new Promise((resolve) => {
+        process.stdout.write(prompt)
+        let data = ''
+        process.stdin.setEncoding('utf-8')
+        process.stdin.on('data', (chunk) => {
+          data += chunk
+          if (data.includes('\n')) {
+            process.stdin.pause()
+            resolve(data.trim())
+          }
+        })
+        process.stdin.resume()
+      })
+
+      config.runtime.provider = await ask(`Provider [${config.runtime.provider || 'github-copilot'}]: `) || config.runtime.provider || 'github-copilot'
+      config.runtime.apiKey = await ask('API Key: ') || config.runtime.apiKey
+      config.runtime.model = await ask(`Model [${config.runtime.model || config.runtime.provider + '/claude-sonnet-4'}]: `) || config.runtime.model
+      config.runtime.runtime = await ask(`Runtime [${config.runtime.runtime || 'openclaw@latest'}]: `) || config.runtime.runtime || 'openclaw@latest'
+    }
+
+    saveConfig(config)
+    console.log(`✅ Credentials saved`)
+    console.log(`   Provider: ${config.runtime.provider}`)
+    console.log(`   Model:    ${config.runtime.model || config.runtime.provider + '/claude-sonnet-4'}`)
+    console.log(`   Runtime:  ${config.runtime.runtime || 'openclaw@latest'}`)
+    console.log(`   Config:   ${CONFIG_FILE}`)
+  })
+
+credentials
+  .command('show')
+  .description('Show current runtime credentials')
+  .action(() => {
+    const config = loadConfig()
+    if (!config.runtime?.provider) {
+      console.log('No credentials configured. Run: clawpack credentials set')
+      return
+    }
+    console.log(`Provider: ${config.runtime.provider}`)
+    console.log(`API Key:  ${config.runtime.apiKey ? config.runtime.apiKey.slice(0, 8) + '...' : '(not set)'}`)
+    console.log(`Model:    ${config.runtime.model || '(default)'}`)
+    console.log(`Runtime:  ${config.runtime.runtime || 'openclaw@latest'}`)
+  })
+
+credentials
+  .command('clear')
+  .description('Remove stored runtime credentials')
+  .action(() => {
+    const config = loadConfig()
+    delete config.runtime
+    saveConfig(config)
+    console.log('✅ Credentials cleared')
+  })
+
+// AGENTS DIR
+const AGENTS_DIR = path.join(CONFIG_DIR, 'agents')
+
+// RUN
+program
+  .command('run <bundle>')
+  .description('Pull and run an agent locally')
+  .option('--runtime <runtime>', 'Runtime override (e.g. openclaw@latest)')
+  .option('--model <model>', 'Model override')
+  .option('--provider <name>', 'Provider override')
+  .option('--api-key <key>', 'API key override')
+  .option('--no-pull', 'Skip pull, use cached workspace')
+  .action(async (bundle: string, opts) => {
+    const { execSync, spawn } = await import('child_process')
+
+    // Parse bundle identifier
+    const match = bundle.match(/^([^/]+)\/([^@]+)(?:@(.+))?$/)
+    if (!match) {
+      console.error('❌ Invalid bundle format. Use: owner/slug[@version]')
+      process.exit(1)
+    }
+    const [, owner, slug, version] = match
+    const agentName = `${owner}-${slug}`
+
+    // Load runtime config (CLI flags override stored config)
+    const config = loadConfig()
+    const rt = config.runtime || {}
+    const provider = opts.provider || rt.provider
+    const apiKey = opts.apiKey || rt.apiKey || process.env.CLAWPACK_API_KEY
+    const model = opts.model || rt.model
+    const runtimeSpec = opts.runtime || rt.runtime || 'openclaw@latest'
+
+    if (!provider || !apiKey) {
+      console.log('ℹ️  No runtime credentials configured — launching without provider override.')
+      console.log('   To set defaults: clawpack credentials set')
+      console.log('   Or pass --provider and --api-key')
+      console.log()
+    }
+
+    // Parse runtime spec: "openclaw@latest" or "openclaw@1.2.3"
+    const [runtimeName, runtimeVersion] = runtimeSpec.split('@')
+
+    // 1. Ensure runtime is available
+    console.log(`🔍 Checking runtime: ${runtimeName}...`)
+    let runtimeBin: string | null = null
+
+    const isWindows = process.platform === 'win32'
+    const whichCmd = isWindows ? 'where' : 'which'
+    const devNull = isWindows ? '2>NUL' : '2>/dev/null'
+
+    if (runtimeName === 'openclaw') {
+      try {
+        const found = execSync(`${whichCmd} openclaw ${devNull}`, { encoding: 'utf-8' }).trim().split('\n')[0]
+        if (found) {
+          runtimeBin = found
+          try {
+            const ver = execSync(`openclaw --version ${devNull}`, { encoding: 'utf-8' }).trim()
+            console.log(`   Found openclaw ${ver}`)
+          } catch {
+            console.log(`   Found openclaw at ${found}`)
+          }
+        }
+      } catch {}
+
+      if (!runtimeBin) {
+        console.log('   OpenClaw not found. Installing via npm...')
+        try {
+          execSync('npm install -g openclaw', { stdio: 'inherit' })
+          runtimeBin = execSync(`${whichCmd} openclaw`, { encoding: 'utf-8' }).trim().split('\n')[0]
+          console.log('   ✅ OpenClaw installed')
+        } catch {
+          console.error('❌ Failed to install OpenClaw. Install manually:')
+          console.error('   npm install -g openclaw')
+          process.exit(1)
+        }
+      }
+    } else if (runtimeName === 'nullclaw') {
+      const candidates = [
+        'nullclaw',
+        path.join(os.homedir(), '.nullclaw', 'bin', 'nullclaw'),
+        ...(isWindows ? [] : ['/usr/local/bin/nullclaw']),
+      ]
+      for (const c of candidates) {
+        try {
+          execSync(`${whichCmd} ${c} ${devNull}`, { stdio: 'pipe' })
+          runtimeBin = c
+          break
+        } catch {}
+      }
+      if (!runtimeBin) {
+        console.error(`❌ ${runtimeName} not found in PATH.`)
+        console.error('   Install from: https://github.com/pigeonflow/brain-arch-v2')
+        process.exit(1)
+      }
+    } else {
+      console.error(`❌ Unknown runtime: ${runtimeName}`)
+      console.error('   Supported: openclaw, nullclaw')
+      process.exit(1)
+    }
+
+    // 2. Pull bundle
+    const workspaceDir = path.join(AGENTS_DIR, owner, slug, 'workspace')
+
+    if (opts.pull !== false) {
+      const ver = version || 'latest'
+      console.log(`📥 Pulling ${owner}/${slug}@${ver}...`)
+      try {
+        const { url, version: resolvedVersion } = await apiRequest(
+          'GET',
+          `/v1/bundles/${owner}/${slug}/${ver}/download`
+        )
+        console.log(`   Version: ${resolvedVersion}`)
+
+        const res = await fetch(url)
+        if (!res.ok) throw new Error(`Download failed: ${res.statusText}`)
+        const tarball = Buffer.from(await res.arrayBuffer())
+
+        // Clean and extract
+        fs.mkdirSync(workspaceDir, { recursive: true })
+        const tmpFile = path.join(os.tmpdir(), `clawpack-run-${Date.now()}.tar.gz`)
+        fs.writeFileSync(tmpFile, tarball)
+        await tar.extract({ file: tmpFile, cwd: workspaceDir, strip: 1 })
+        fs.unlinkSync(tmpFile)
+        console.log(`   Extracted to ${workspaceDir}`)
+      } catch (err: any) {
+        console.error(`❌ Pull failed: ${err.message}`)
+        process.exit(1)
+      }
+    }
+
+    if (!fs.existsSync(workspaceDir)) {
+      console.error(`❌ Workspace not found: ${workspaceDir}`)
+      console.error('   Run without --no-pull to download first.')
+      process.exit(1)
+    }
+
+    // 3. Run post-install script if present
+    const postInstallScript = path.join(workspaceDir, 'scripts', 'post-install.sh')
+    const postInstallScriptWin = path.join(workspaceDir, 'scripts', 'post-install.bat')
+
+    let scriptToRun: string | null = null
+    let scriptCmd: string
+
+    if (isWindows && fs.existsSync(postInstallScriptWin)) {
+      scriptToRun = postInstallScriptWin
+      scriptCmd = `"${postInstallScriptWin}"`
+    } else if (fs.existsSync(postInstallScript)) {
+      scriptToRun = postInstallScript
+      if (isWindows) {
+        // Use Git Bash on Windows — convert backslashes to forward slashes
+        const shPath = postInstallScript.replace(/\\/g, '/')
+        scriptCmd = `bash "${shPath}"`
+      } else {
+        scriptCmd = `bash "${postInstallScript}"`
+      }
+    } else {
+      scriptToRun = null
+      scriptCmd = ''
+    }
+
+    if (scriptToRun) {
+      console.log(`📦 Running post-install script...`)
+      try {
+        execSync(scriptCmd, {
+          stdio: 'inherit',
+          cwd: workspaceDir,
+          env: {
+            ...process.env,
+            CLAWPACK_WORKSPACE: workspaceDir,
+            CLAWPACK_AGENT: agentName,
+            CLAWPACK_OWNER: owner,
+            CLAWPACK_SLUG: slug,
+          },
+          shell: isWindows ? 'cmd.exe' : undefined,
+        })
+        console.log(`   ✅ Post-install complete`)
+      } catch (err: any) {
+        console.warn(`   ⚠️  Post-install script failed: ${err.message}`)
+        console.warn(`   Continuing anyway...`)
+      }
+    }
+
+    // 4. Launch with the appropriate runtime
+    const resolvedModel = model || (provider ? `${provider}/claude-sonnet-4` : null)
+    console.log(`\n🦀 Starting ${owner}/${slug}...`)
+    console.log(`   Runtime:   ${runtimeSpec}`)
+    console.log(`   Workspace: ${workspaceDir}`)
+    if (resolvedModel) console.log(`   Model:     ${resolvedModel}`)
+    console.log()
+
+    if (runtimeName === 'openclaw') {
+      // Check if agent already registered, register if not
+      let needsRegister = true
+      try {
+        const list = execSync(`openclaw agents list --json ${devNull}`, { encoding: 'utf-8', shell: isWindows ? 'cmd.exe' : undefined })
+        const agents = JSON.parse(list)
+        if (agents.find((a: any) => a.name === agentName)) {
+          needsRegister = false
+        }
+      } catch {}
+
+      if (needsRegister) {
+        console.log(`   Registering agent "${agentName}"...`)
+        try {
+          const modelFlag = resolvedModel ? ` --model ${resolvedModel}` : ''
+          execSync(
+            `openclaw agents add ${agentName} --workspace ${workspaceDir}${modelFlag} --non-interactive`,
+            { stdio: 'inherit' }
+          )
+        } catch (err: any) {
+          // If it failed because agent already exists, that's fine
+          if (err.message?.includes('already exists') || err.stderr?.includes('already exists')) {
+            console.log(`   Agent "${agentName}" already registered.`)
+          } else {
+            console.error(`❌ Failed to register agent: ${err.message}`)
+            process.exit(1)
+          }
+        }
+      }
+
+      // Set up auth profile with provider credentials (only if provided)
+      if (provider && apiKey) {
+        const agentDir = path.join(os.homedir(), '.openclaw', 'agents', agentName, 'agent')
+        fs.mkdirSync(agentDir, { recursive: true })
+
+        const authProfilesPath = path.join(agentDir, 'auth-profiles.json')
+        const profileKey = `${provider}:default`
+        const authProfiles = {
+          version: 1,
+          profiles: {
+            [profileKey]: {
+              type: 'token',
+              provider,
+              token: apiKey,
+            },
+          },
+          lastGood: {
+            [provider]: profileKey,
+          },
+        }
+        fs.writeFileSync(authProfilesPath, JSON.stringify(authProfiles, null, 2))
+      }
+
+      // Launch agent — one-shot message
+      const introMessage = 'Hello! I just pulled you from ClawPack. Introduce yourself.'
+
+      let child
+      if (isWindows) {
+        // On Windows, spawn via shell with properly quoted command
+        const cmd = `"${runtimeBin}" agent --agent ${agentName} --local -m "${introMessage}"`
+        child = spawn(cmd, [], {
+          stdio: 'inherit',
+          env: { ...process.env },
+          shell: true,
+        })
+      } else {
+        child = spawn(runtimeBin!, ['agent', '--agent', agentName, '--local', '-m', introMessage], {
+          stdio: 'inherit',
+          env: { ...process.env },
+        })
+      }
+
+      child.on('error', (err) => {
+        console.error(`❌ Failed to start: ${err.message}`)
+        process.exit(1)
+      })
+      child.on('exit', (code) => process.exit(code || 0))
+      process.on('SIGINT', () => child.kill('SIGINT'))
+      process.on('SIGTERM', () => child.kill('SIGTERM'))
+
+    } else if (runtimeName === 'nullclaw') {
+      // Generate nullclaw config
+      const configPath = path.join(workspaceDir, '.nullclaw.json')
+      const nullclawConfig = {
+        default_temperature: 0.7,
+        models: {
+          providers: {
+            [provider]: { api_key: apiKey },
+          },
+        },
+        agents: {
+          defaults: {
+            model: { primary: resolvedModel },
+          },
+        },
+        channels: { cli: true },
+        memory: {
+          profile: 'markdown_only',
+          backend: 'markdown',
+          auto_save: true,
+        },
+      }
+      fs.writeFileSync(configPath, JSON.stringify(nullclawConfig, null, 2))
+
+      const nullChild = isWindows
+        ? spawn(`"${runtimeBin}" --config "${configPath}" --workspace "${workspaceDir}"`, [], {
+            stdio: 'inherit', cwd: workspaceDir, shell: true,
+          })
+        : spawn(runtimeBin!, ['--config', configPath, '--workspace', workspaceDir], {
+            stdio: 'inherit', cwd: workspaceDir,
+          })
+
+      nullChild.on('error', (err) => {
+        console.error(`❌ Failed to start NullClaw: ${err.message}`)
+        process.exit(1)
+      })
+      nullChild.on('exit', (code) => process.exit(code || 0))
+      process.on('SIGINT', () => nullChild.kill('SIGINT'))
+      process.on('SIGTERM', () => nullChild.kill('SIGTERM'))
+    }
+  })
+
+program
+  .command('update')
+  .description('Update clawpack CLI to the latest version')
+  .action(async () => {
+    const { execSync } = await import('child_process')
+    console.log(`Current version: ${PKG_VERSION}`)
+    console.log('🔄 Checking for updates...')
+    try {
+      const latest = execSync('npm view clawpack version', { encoding: 'utf-8' }).trim()
+      if (latest === PKG_VERSION) {
+        console.log(`✅ Already on latest version (${PKG_VERSION})`)
+        return
+      }
+      console.log(`   New version available: ${latest}`)
+      console.log('   Installing...')
+      execSync('npm install -g clawpack@latest', { stdio: 'inherit' })
+      console.log(`✅ Updated to clawpack@${latest}`)
+    } catch (err: any) {
+      console.error(`❌ Update failed: ${err.message}`)
+      console.error('   Try manually: npm install -g clawpack@latest')
+      process.exit(1)
+    }
+  })
+
+// LINK
+program
+  .command('link [path]')
+  .description('Register a pulled agent in OpenClaw (post-install, auth, health check)')
+  .option('--name <name>', 'Override agent name')
+  .option('--provider <name>', 'Auth provider (e.g. openrouter, anthropic)')
+  .option('--api-key <key>', 'Auth API key')
+  .option('--model <model>', 'Model override')
+  .option('--skip-health-check', 'Skip the health check ping')
+  .action(async (dir: string | undefined, opts) => {
+    const { linkAgent } = await import('./link.js')
+    linkAgent(path.resolve(dir || '.'), {
+      name: opts.name,
+      provider: opts.provider,
+      apiKey: opts.apiKey,
+      model: opts.model,
+      skipHealthCheck: opts.skipHealthCheck,
+    })
+  })
+
+// UNLINK
+program
+  .command('unlink <name>')
+  .description('Unregister an agent from OpenClaw (keeps workspace files)')
+  .action(async (name: string) => {
+    const { unlinkAgent } = await import('./link.js')
+    unlinkAgent(name)
+  })
+
+// PARASITE
+program
+  .command('parasite [bundle]')
+  .description('Hot-swap a ClawPack agent onto another agent\'s channels')
+  .option('--host <agent>', 'Host agent to parasitize (default: main)', 'main')
+  .option('--provider <name>', 'Auth provider')
+  .option('--api-key <key>', 'Auth API key')
+  .option('--model <model>', 'Model override')
+  .option('--no-pull', 'Skip pull, use already-linked agent')
+  .option('--restore [name]', 'Restore a specific parasite (or the only one)')
+  .option('--all', 'Restore all parasites (use with --restore)')
+  .option('--list', 'List active parasite sessions')
+  .action(async (bundle: string | undefined, opts) => {
+    const { startParasite, restoreParasite, listParasites } = await import('./parasite.js')
+    if (opts.list) {
+      listParasites()
+    } else if (opts.restore !== undefined) {
+      const target = typeof opts.restore === 'string' ? opts.restore : undefined
+      await restoreParasite(target, opts.all)
+    } else if (!bundle) {
+      console.error('❌ Bundle required. Use: clawpack parasite owner/slug --host agent_id')
+      console.error('   Or: clawpack parasite --restore [name] | --restore --all | --list')
+      process.exit(1)
+    } else {
+      await startParasite({
+        bundle,
+        host: opts.host,
+        provider: opts.provider,
+        apiKey: opts.apiKey,
+        model: opts.model,
+        noPull: opts.pull === false,
+      })
+    }
+  })
+
+// CHAT
+program
+  .command('chat <bundle>')
+  .description('Start an interactive chat session with a pulled agent')
+  .option('--model <model>', 'Override the model')
+  .action(async (bundle: string, opts) => {
+    const { startChat } = await import('./chat.js')
+    await startChat(bundle, { model: opts.model })
+  })
+
+program.parse()
