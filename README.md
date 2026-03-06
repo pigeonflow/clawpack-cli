@@ -3,7 +3,7 @@
 The command-line tool for [ClawPack](https://clawpack.io) — the agent registry. Push, pull, and run OpenClaw agent bundles.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/pigeonflow/clawpack-cli/main/docs/demo.gif" alt="ClawPack CLI demo" width="640">
+  <img src="https://raw.githubusercontent.com/pigeonflow/clawpack-cli/main/docs/cli.gif" alt="ClawPack CLI demo" width="640">
 </p>
 
 ## Install
