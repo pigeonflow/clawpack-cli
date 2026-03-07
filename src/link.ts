@@ -95,8 +95,40 @@ export function resolveAuth(provider?: string, apiKey?: string): { provider?: st
   const envKey = process.env.CLAWPACK_API_KEY
   if (envKey) return { provider: provider || 'openrouter', apiKey: envKey }
 
-  // Fallback to main agent
+  // Fallback to default agent (find via openclaw config or agents list)
   return { fromMain: true }
+}
+
+/**
+ * Find the agent dir for the default (or first available) agent.
+ * Checks openclaw.json config for default agent, falls back to 'main'.
+ */
+function findMainAgentDir(): string {
+  const agentsBase = path.join(os.homedir(), '.openclaw', 'agents')
+
+  // Try reading openclaw.json to find the default agent
+  const configPaths = [
+    path.join(os.homedir(), '.openclaw', 'openclaw.json'),
+  ]
+  for (const configPath of configPaths) {
+    try {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
+      const agents = config.agents?.list || []
+      const defaultAgent = agents.find((a: any) => a.default || a.isDefault)
+      if (defaultAgent?.id) {
+        const dir = path.join(agentsBase, defaultAgent.id, 'agent')
+        if (fs.existsSync(path.join(dir, 'auth-profiles.json'))) return dir
+      }
+      // Try first agent with auth
+      for (const a of agents) {
+        const dir = path.join(agentsBase, a.id, 'agent')
+        if (fs.existsSync(path.join(dir, 'auth-profiles.json'))) return dir
+      }
+    } catch {}
+  }
+
+  // Last resort: 'main'
+  return path.join(agentsBase, 'main', 'agent')
 }
 
 /**
@@ -107,8 +139,8 @@ export function setupAuth(agentName: string, opts: { provider?: string; apiKey?:
   fs.mkdirSync(agentDir, { recursive: true })
 
   if (opts.fromMain) {
-    // Copy from main agent
-    const mainDir = path.join(os.homedir(), '.openclaw', 'agents', 'main', 'agent')
+    // Copy from default/first agent with auth
+    const mainDir = findMainAgentDir()
     for (const file of ['auth-profiles.json', 'models.json']) {
       const src = path.join(mainDir, file)
       const dst = path.join(agentDir, file)
