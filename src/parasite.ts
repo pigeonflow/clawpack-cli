@@ -105,7 +105,6 @@ export function applyParasiteConfig(
   if (config.bindings && config.bindings.length > 0) {
     for (const binding of config.bindings) {
       if (binding.agentId === hostAgentId) {
-        binding._parasiteOriginal = hostAgentId
         binding.agentId = parasiteAgentId
       }
     }
@@ -121,7 +120,6 @@ export function applyParasiteConfig(
     config.bindings.unshift({
       agentId: parasiteAgentId,
       match: { channel: '*' },
-      _parasite: true,
     })
     result.addedBindingMark = true
   }
@@ -144,16 +142,17 @@ export function unapplyParasiteConfig(config: any, session: ParasiteSession): vo
   }
 
   if (session.addedBindingMark && config.bindings) {
+    // Remove the catch-all binding we added for this parasite
     config.bindings = config.bindings.filter(
-      (b: any) => !(b._parasite && b.agentId === session.parasiteAgentId)
+      (b: any) => !(b.agentId === session.parasiteAgentId && b.match?.channel === '*')
     )
   }
 
   if (config.bindings) {
+    // Restore bindings that were rerouted from host to parasite
     for (const binding of config.bindings) {
-      if (binding.agentId === session.parasiteAgentId && binding._parasiteOriginal === session.hostAgentId) {
+      if (binding.agentId === session.parasiteAgentId) {
         binding.agentId = session.hostAgentId
-        delete binding._parasiteOriginal
       }
     }
   }
