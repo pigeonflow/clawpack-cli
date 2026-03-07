@@ -213,7 +213,7 @@ export function linkAgent(workspaceDir: string, opts: LinkOptions = {}): string 
     alreadyRegistered = agents.some((a: any) => a.name === agentName || a.id === agentName)
   } catch {}
 
-  const resolvedModel = opts.model || (opts.provider ? `${opts.provider}/claude-sonnet-4` : undefined)
+  const resolvedModel = opts.model || manifest?.model || (opts.provider ? `${opts.provider}/claude-sonnet-4` : undefined)
   const modelFlag = resolvedModel ? ` --model ${resolvedModel}` : ''
 
   if (alreadyRegistered) {
