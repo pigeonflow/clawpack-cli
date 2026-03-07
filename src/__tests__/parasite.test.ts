@@ -206,7 +206,7 @@ describe('applyParasiteConfig', () => {
     expect((config.agents.list[1] as any).default).toBe(true)
   })
 
-  it('reroutes bindings pointing to host with _parasiteOriginal marker', async () => {
+  it('reroutes bindings pointing to host', async () => {
     vi.resetModules()
     const { applyParasiteConfig } = await import('../parasite.js')
     const config = {
@@ -218,9 +218,7 @@ describe('applyParasiteConfig', () => {
     }
     applyParasiteConfig(config, 'p-agent', 'main')
     expect(config.bindings[0].agentId).toBe('p-agent')
-    expect((config.bindings[0] as any)._parasiteOriginal).toBe('main')
     expect(config.bindings[1].agentId).toBe('other')
-    expect((config.bindings[1] as any)._parasiteOriginal).toBeUndefined()
   })
 
   it('adds catch-all binding when host is NOT default', async () => {
@@ -236,8 +234,32 @@ describe('applyParasiteConfig', () => {
     expect(config.bindings[0]).toEqual({
       agentId: 'p-agent',
       match: { channel: '*' },
-      _parasite: true,
     })
+  })
+
+  it('never injects underscore-prefixed keys into config', async () => {
+    vi.resetModules()
+    const { applyParasiteConfig } = await import('../parasite.js')
+
+    // Test with binding reroute
+    const config1 = {
+      agents: { list: [{ id: 'host', default: true }, { id: 'parasite' }] },
+      bindings: [{ agentId: 'host', match: { channel: 'telegram' } }],
+    }
+    applyParasiteConfig(config1, 'parasite', 'host')
+    const json1 = JSON.stringify(config1)
+    expect(json1).not.toContain('_parasite')
+    expect(json1).not.toContain('_parasiteOriginal')
+
+    // Test with catch-all binding
+    const config2 = {
+      agents: { list: [{ id: 'main', default: true }, { id: 'host' }, { id: 'parasite' }] },
+      bindings: [{ agentId: 'host', match: { channel: 'telegram' } }],
+    }
+    applyParasiteConfig(config2, 'parasite', 'host')
+    const json2 = JSON.stringify(config2)
+    expect(json2).not.toContain('_parasite')
+    expect(json2).not.toContain('_parasiteOriginal')
   })
 })
 
@@ -266,7 +288,7 @@ describe('unapplyParasiteConfig', () => {
     const config = {
       agents: { list: [{ id: 'main' }, { id: 'p-agent' }] },
       bindings: [
-        { agentId: 'p-agent', _parasiteOriginal: 'main', match: { channel: 'telegram' } },
+        { agentId: 'p-agent', match: { channel: 'telegram' } },
         { agentId: 'other', match: { channel: 'discord' } },
       ],
     }
@@ -276,7 +298,6 @@ describe('unapplyParasiteConfig', () => {
       startedAt: '',
     })
     expect(config.bindings[0].agentId).toBe('main')
-    expect((config.bindings[0] as any)._parasiteOriginal).toBeUndefined()
     expect(config.bindings[1].agentId).toBe('other')
   })
 
@@ -286,7 +307,7 @@ describe('unapplyParasiteConfig', () => {
     const config = {
       agents: { list: [{ id: 'main', default: true }, { id: 'p-agent' }] },
       bindings: [
-        { agentId: 'p-agent', match: { channel: '*' }, _parasite: true },
+        { agentId: 'p-agent', match: { channel: '*' } },
         { agentId: 'main', match: { channel: 'telegram' } },
       ],
     }
