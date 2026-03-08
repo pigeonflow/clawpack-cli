@@ -39,6 +39,8 @@ clawpack run hugo/caramelo
 | `clawpack pull <owner/slug> --link` | Download, extract, and register in OpenClaw |
 | `clawpack search <query>` | Search the registry |
 | `clawpack list` | List your published bundles |
+| `clawpack create [name]` | Create a new agent project (interactive wizard) |
+| `clawpack create [name] --template owner/slug` | Create from a template bundle |
 | `clawpack update` | Update the CLI to the latest version |
 
 ### `clawpack push`
@@ -86,6 +88,20 @@ clawpack pull hugo/caramelo --link
 clawpack search "sales agent"
 clawpack search translator --limit 5
 ```
+
+### `clawpack create`
+
+Scaffold a new agent project with an interactive wizard:
+
+```bash
+# Interactive wizard
+clawpack create my-agent
+
+# From a template
+clawpack create my-agent --template hugo/starter
+```
+
+The wizard asks for name, description, persona type, personality, and emoji — then generates a complete agent project with `manifest.json`, `SOUL.md`, `AGENTS.md`, `IDENTITY.md`, `README.md`, and `skills/` + `memory/` directories.
 
 ### Agent Management
 

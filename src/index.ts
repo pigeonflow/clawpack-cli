@@ -857,4 +857,218 @@ program
     await startChat(bundle, { model: opts.model })
   })
 
+// CREATE
+function askInput(prompt: string, defaultVal?: string): Promise<string> {
+  return new Promise((resolve) => {
+    const suffix = defaultVal ? ` [${defaultVal}]` : ''
+    process.stdout.write(`${prompt}${suffix}: `)
+    let data = ''
+    process.stdin.setEncoding('utf-8')
+    process.stdin.on('data', (chunk) => {
+      data += chunk
+      if (data.includes('\n')) {
+        process.stdin.pause()
+        resolve(data.trim() || defaultVal || '')
+      }
+    })
+    process.stdin.resume()
+  })
+}
+
+function choose(prompt: string, options: string[], defaultIdx = 0): Promise<string> {
+  return new Promise((resolve) => {
+    console.log(`\n${prompt}`)
+    options.forEach((o, i) => console.log(`  ${i + 1}) ${o}${i === defaultIdx ? ' (default)' : ''}`))
+    process.stdout.write(`Choice [${defaultIdx + 1}]: `)
+    let data = ''
+    process.stdin.setEncoding('utf-8')
+    process.stdin.on('data', (chunk) => {
+      data += chunk
+      if (data.includes('\n')) {
+        process.stdin.pause()
+        const idx = parseInt(data.trim()) - 1
+        resolve(options[idx] || options[defaultIdx])
+      }
+    })
+    process.stdin.resume()
+  })
+}
+
+const PERSONA_BASES: Record<string, string> = {
+  coding: "You live in code. Clean APIs are your love language. You hate boilerplate, premature abstraction, and magic. When someone asks for help, you give them the simplest thing that works — then explain why.",
+  sales: "You read people. Every conversation is an opportunity to understand what someone actually needs — not what they say they need. You ask great questions, listen carefully, and connect dots others miss.",
+  support: "You're the person everyone wishes they got when they called for help. Patient, thorough, and you anticipate the follow-up question before it's asked. You make complex things simple without being condescending.",
+  creative: "Your mind works in colors and connections. You see patterns where others see noise. You make unexpected leaps that somehow land perfectly. Constraints don't limit you — they focus you.",
+  research: "You're methodical without being boring. Every claim needs evidence, every analysis needs structure. But you also know when to step back and say 'here's what the data actually means' in plain language.",
+  assistant: "You're the reliable one. Not flashy, not trying to impress — just genuinely helpful. You remember context, anticipate needs, and handle things before being asked.",
+  devops: "Infrastructure is your canvas. You think in systems, pipelines, and failure modes. If it's not automated, it's not done. If it's not monitored, it doesn't exist.",
+  custom: "You're a blank canvas with strong opinions. Define your own path.",
+}
+
+const PERSONALITY_LAYERS: Record<string, string> = {
+  friendly: "Your tone is warm and approachable. You use casual language, the occasional emoji, and make people feel at ease. You're the coworker everyone actually likes talking to.",
+  professional: "You communicate with clarity and structure. Formal but never stiff — you respect people's time with well-organized, thoughtful responses.",
+  direct: "You don't do filler. Every word earns its place. You say what needs saying, then stop. People come to you because you don't waste their time.",
+  witty: "You have a dry sense of humor and a knack for clever asides. Playful without being unprofessional — your personality makes even mundane tasks entertaining.",
+  calm: "You're measured and reassuring. Nothing rattles you. Your steady presence makes others feel like everything is under control, even when it's not.",
+  energetic: "You bring momentum to everything you do. Enthusiastic without being exhausting, you use that energy to drive progress and keep things moving forward.",
+}
+
+const PERSONA_EMOJI: Record<string, string> = {
+  assistant: '🤖', coding: '💻', sales: '💼', support: '🎧',
+  creative: '🎨', research: '🔬', devops: '⚙️', custom: '✨',
+}
+
+function generateSoul(persona: string, personality: string, name: string): string {
+  const base = PERSONA_BASES[persona] || PERSONA_BASES.custom
+  const layer = PERSONALITY_LAYERS[personality] || PERSONALITY_LAYERS.friendly
+  return `# ${name}
+
+## Core
+
+${base}
+
+## Communication Style
+
+${layer}
+
+## Principles
+
+- Quality over quantity — every interaction should leave people better off
+- Own your mistakes, learn fast, move on
+- Context matters — read the room before you speak
+- Be genuinely useful, not performatively busy
+`
+}
+
+const AGENTS_MD_TEMPLATE = `# AGENTS.md
+
+## Every Session
+1. Read \`SOUL.md\` — who you are
+2. Read \`USER.md\` if it exists — who you're helping
+3. Check \`memory/\` for recent context
+
+## Memory
+- Daily notes: \`memory/YYYY-MM-DD.md\`
+- Long-term: \`MEMORY.md\`
+- Write things down. Memory doesn't survive sessions. Files do.
+
+## Safety
+- Don't exfiltrate data
+- Ask before destructive or external actions
+- \`trash\` > \`rm\`
+
+## External Actions
+**Do freely:** Read files, search, organize, learn
+**Ask first:** Send emails, post publicly, anything that leaves the machine
+`
+
+program
+  .command('create [name]')
+  .description('Create a new agent project (interactive wizard or from template)')
+  .option('--template <owner/slug>', 'Create from a ClawPack template bundle')
+  .action(async (nameArg: string | undefined, opts) => {
+    if (opts.template) {
+      // Template mode
+      const match = opts.template.match(/^([^/]+)\/([^@]+)(?:@(.+))?$/)
+      if (!match) {
+        console.error('❌ Invalid template format. Use: owner/slug')
+        process.exit(1)
+      }
+      const [, owner, slug, version] = match
+      const agentName = nameArg || slug
+      const targetDir = path.resolve(agentName)
+
+      console.log(`📥 Pulling template ${owner}/${slug}...`)
+      try {
+        const { url, version: resolvedVersion } = await apiRequest(
+          'GET',
+          `/v1/bundles/${owner}/${slug}/${version || 'latest'}/download`
+        )
+        console.log(`   Version: ${resolvedVersion}`)
+
+        const res = await fetch(url)
+        if (!res.ok) throw new Error(`Download failed: ${res.statusText}`)
+        const tarball = Buffer.from(await res.arrayBuffer())
+
+        fs.mkdirSync(targetDir, { recursive: true })
+        const tmpFile = path.join(os.tmpdir(), `clawpack-create-${Date.now()}.tar.gz`)
+        fs.writeFileSync(tmpFile, tarball)
+        await tar.extract({ file: tmpFile, cwd: targetDir, strip: 1 })
+        fs.unlinkSync(tmpFile)
+
+        // Update manifest
+        const manifestPath = path.join(targetDir, 'manifest.json')
+        if (fs.existsSync(manifestPath)) {
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
+          manifest.version = '0.1.0'
+          if (nameArg) manifest.name = nameArg
+          fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+        }
+
+        console.log(`\n✅ Created ${agentName}/ from template ${owner}/${slug}`)
+        console.log(`\n   cd ${agentName}`)
+        console.log(`   clawpack push`)
+      } catch (err: any) {
+        console.error(`❌ Failed: ${err.message}`)
+        process.exit(1)
+      }
+      return
+    }
+
+    // Interactive wizard
+    const dirDefault = path.basename(process.cwd())
+    const name = await askInput('Agent name', nameArg || dirDefault)
+    const description = await askInput('Description (one line)')
+
+    const personas = ['assistant', 'coding', 'sales', 'support', 'creative', 'research', 'devops', 'custom']
+    const persona = await choose('Persona type:', personas, 0)
+
+    const personalities = ['friendly', 'professional', 'direct', 'witty', 'calm', 'energetic']
+    const personality = await choose('Personality:', personalities, 0)
+
+    const defaultEmoji = PERSONA_EMOJI[persona] || '✨'
+    const emoji = await askInput('Emoji', defaultEmoji)
+
+    const targetDir = path.resolve(name)
+    if (fs.existsSync(targetDir)) {
+      console.error(`❌ Directory ${name}/ already exists`)
+      process.exit(1)
+    }
+
+    // Create directory structure
+    fs.mkdirSync(path.join(targetDir, 'skills'), { recursive: true })
+    fs.mkdirSync(path.join(targetDir, 'memory'), { recursive: true })
+
+    // manifest.json
+    fs.writeFileSync(path.join(targetDir, 'manifest.json'), JSON.stringify({
+      name,
+      version: '0.1.0',
+      description,
+      tags: [persona, personality],
+    }, null, 2) + '\n')
+
+    // SOUL.md
+    fs.writeFileSync(path.join(targetDir, 'SOUL.md'), generateSoul(persona, personality, name))
+
+    // AGENTS.md
+    fs.writeFileSync(path.join(targetDir, 'AGENTS.md'), AGENTS_MD_TEMPLATE)
+
+    // IDENTITY.md
+    fs.writeFileSync(path.join(targetDir, 'IDENTITY.md'), `# ${emoji} ${name}\n\n**Name:** ${name}\n**Emoji:** ${emoji}\n**Type:** ${persona}\n`)
+
+    // README.md
+    fs.writeFileSync(path.join(targetDir, 'README.md'), `# ${emoji} ${name}\n\n${description || 'An AI agent built with ClawPack.'}\n\n## Install\n\n\`\`\`bash\nclawpack pull your-username/${name}\n\`\`\`\n\n## Usage\n\n\`\`\`bash\nclawpack run your-username/${name}\n\`\`\`\n\n## Publish\n\n\`\`\`bash\nclawpack push\n\`\`\`\n`)
+
+    // .gitkeep files
+    fs.writeFileSync(path.join(targetDir, 'skills', '.gitkeep'), '')
+    fs.writeFileSync(path.join(targetDir, 'memory', '.gitkeep'), '')
+
+    console.log(`\n✅ Created ${name}/`)
+    console.log(`\n   Next steps:`)
+    console.log(`   cd ${name}`)
+    console.log(`   # Edit SOUL.md to refine your agent's personality`)
+    console.log(`   clawpack push`)
+  })
+
 program.parse()
