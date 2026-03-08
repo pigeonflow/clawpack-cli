@@ -236,6 +236,29 @@ export interface ParasiteOptions {
 export async function startParasite(opts: ParasiteOptions): Promise<void> {
   const stateFile = loadStateFile()
 
+  // Validate config is clean before proceeding
+  try {
+    const doctorOut = execSync(`openclaw doctor --json ${devNull}`, { encoding: 'utf-8', shell: isWindows ? 'cmd.exe' : undefined })
+    try {
+      const doctor = JSON.parse(doctorOut)
+      if (doctor.unknownKeys?.length || doctor.configInvalid) {
+        console.error('❌ OpenClaw config has issues. Fix them first:')
+        console.error('   openclaw doctor --fix')
+        process.exit(1)
+      }
+    } catch {}
+  } catch {
+    // doctor command might not support --json, try without
+    try {
+      const doctorOut = execSync(`openclaw doctor ${devNull}`, { encoding: 'utf-8', shell: isWindows ? 'cmd.exe' : undefined })
+      if (doctorOut.includes('Unknown config keys') || doctorOut.includes('Config invalid')) {
+        console.error('❌ OpenClaw config has issues. Fix them first:')
+        console.error('   openclaw doctor --fix')
+        process.exit(1)
+      }
+    } catch {}
+  }
+
   // Check if this host already has a parasite
   const existingOnHost = stateFile.sessions.find(s => s.hostAgentId === opts.host)
   if (existingOnHost) {
