@@ -303,7 +303,7 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
   // 8. Interactive loop
   rl.prompt()
 
-  rl.on('line', async (line: string) => {
+  const lineHandler = async (line: string) => {
     const input = line.trim()
 
     if (!input) {
@@ -345,11 +345,26 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
     }
 
     rl.prompt()
-  })
+  }
 
-  rl.on('close', () => {
-    // readline close fires on SIGINT too — only exit if double-SIGINT was pressed
-    // Re-open the readline interface to keep chat alive after single Ctrl+C
-    // If we get here from /exit or /quit, process.exit was already called
-  })
+  rl.on('line', lineHandler)
+
+  const closeHandler = () => {
+    // On Windows, readline can close unexpectedly (e.g. after child process).
+    // Recreate it to keep the chat alive. /exit and /quit call process.exit() directly.
+    rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: chalk.hex('#FF6B35')('🦀 > '),
+    })
+    rl.on('SIGINT', () => {
+      rl.write('\n')
+      rl.prompt()
+    })
+    rl.on('line', lineHandler)
+    rl.on('close', closeHandler)
+    rl.prompt()
+  }
+
+  rl.on('close', closeHandler)
 }
