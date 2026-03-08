@@ -194,14 +194,30 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
   }
 
   // Cleanup on exit
+  let cleaned = false
   const cleanup = () => {
+    if (cleaned) return
+    cleaned = true
     if (!existing.exists) {
       unregisterAgent(agentIndex)
     }
   }
   process.on('exit', cleanup)
-  process.on('SIGINT', () => { cleanup(); process.exit(0) })
   process.on('SIGTERM', () => { cleanup(); process.exit(0) })
+
+  // Double SIGINT to exit
+  let sigintCount = 0
+  let sigintTimer: ReturnType<typeof setTimeout> | null = null
+  process.on('SIGINT', () => {
+    sigintCount++
+    if (sigintCount >= 2) {
+      cleanup()
+      process.exit(0)
+    }
+    console.log('\n  Press Ctrl+C again to exit.')
+    if (sigintTimer) clearTimeout(sigintTimer)
+    sigintTimer = setTimeout(() => { sigintCount = 0 }, 2000)
+  })
 
   // 4. Show startup UI
   console.clear()
@@ -233,10 +249,17 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
   console.log(chalk.dim('  ─────────────────────────────────\n'))
 
   // 5. Set up readline
-  const rl = readline.createInterface({
+  let rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
     prompt: chalk.hex('#FF6B35')('🦀 > '),
+  })
+
+  // Prevent SIGINT from closing readline — we handle it ourselves
+  rl.on('SIGINT', () => {
+    // Absorb — let the process-level SIGINT handler deal with it
+    rl.write('\n')
+    rl.prompt()
   })
 
   const sessionId = `clawpack-${Date.now()}`
@@ -325,7 +348,8 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
   })
 
   rl.on('close', () => {
-    console.log(chalk.hex('#FF6B35')('\n  👋 See you later! 🦀\n'))
-    process.exit(0)
+    // readline close fires on SIGINT too — only exit if double-SIGINT was pressed
+    // Re-open the readline interface to keep chat alive after single Ctrl+C
+    // If we get here from /exit or /quit, process.exit was already called
   })
 }
