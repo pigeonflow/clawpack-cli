@@ -1087,19 +1087,46 @@ program
 
     const [, owner, slug] = match
     const tmpBase = path.join(os.tmpdir(), `clawpack-diff-${Date.now()}`)
+    const bundlesCache = path.join(os.homedir(), '.clawpack', 'bundles')
+
+    // Resolve a version to a directory — checks cache first, downloads if needed
+    const resolveVersion = async (version: string, label: string): Promise<{ dir: string; resolved: string }> => {
+      // Check cache: ~/.clawpack/bundles/<owner>/<slug>/manifest.json
+      const cachedDir = path.join(bundlesCache, owner, slug)
+      if (fs.existsSync(path.join(cachedDir, 'manifest.json'))) {
+        try {
+          const manifest = JSON.parse(fs.readFileSync(path.join(cachedDir, 'manifest.json'), 'utf-8'))
+          if (version !== 'latest' && manifest.version === version) {
+            console.log(`📦 Using cached ${owner}/${slug}@${manifest.version}`)
+            return { dir: cachedDir, resolved: manifest.version }
+          }
+        } catch {}
+      }
+
+      // Download
+      console.log(`📥 Pulling ${owner}/${slug}@${version}...`)
+      const res = await apiRequest('GET', `/v1/bundles/${owner}/${slug}/${version}/download`)
+      const dir = path.join(tmpBase, label)
+      fs.mkdirSync(dir, { recursive: true })
+      const tarPath = path.join(tmpBase, `${label}.tar.gz`)
+      const dl = await fetch(res.url)
+      if (!dl.ok) throw new Error(`Download failed: ${dl.status}`)
+      fs.writeFileSync(tarPath, Buffer.from(await dl.arrayBuffer()))
+      execSync(`tar xzf "${tarPath}" -C "${dir}"`, { stdio: 'pipe' })
+      const sub = fs.readdirSync(dir).filter(f => fs.statSync(path.join(dir, f)).isDirectory())
+      const finalDir = sub.length === 1 ? path.join(dir, sub[0]) : dir
+      return { dir: finalDir, resolved: res.version }
+    }
 
     try {
-      // Determine versions to compare
       let fromDir: string
       let toDir: string
       let fromLabel: string
       let toLabel: string
 
       if (opts.local) {
-        // Compare local working copy against a published version
         const localDir = path.resolve('.')
-        const localManifest = path.join(localDir, 'manifest.json')
-        if (!fs.existsSync(localManifest)) {
+        if (!fs.existsSync(path.join(localDir, 'manifest.json'))) {
           console.error('❌ No manifest.json found in current directory')
           process.exit(1)
         }
@@ -1107,26 +1134,11 @@ program
         toLabel = 'local'
 
         const compareVer = opts.from || opts.to || 'latest'
-        console.log(`📥 Pulling ${owner}/${slug}@${compareVer} for comparison...`)
-        const { url, version: resolvedFrom } = await apiRequest(
-          'GET',
-          `/v1/bundles/${owner}/${slug}/${compareVer}/download`
-        )
-        fromLabel = `v${resolvedFrom}`
-        fromDir = path.join(tmpBase, 'from')
-        fs.mkdirSync(fromDir, { recursive: true })
-        const res = await fetch(url)
-        if (!res.ok) throw new Error(`Download failed: ${res.status}`)
-        const tarPath = path.join(tmpBase, 'from.tar.gz')
-        fs.writeFileSync(tarPath, Buffer.from(await res.arrayBuffer()))
-        execSync(`tar xzf "${tarPath}" -C "${fromDir}"`, { stdio: 'pipe' })
-        // Tarballs extract into a subdirectory — find it
-        const fromSub = fs.readdirSync(fromDir).filter(f => fs.statSync(path.join(fromDir, f)).isDirectory())
-        if (fromSub.length === 1) fromDir = path.join(fromDir, fromSub[0])
+        const from = await resolveVersion(compareVer, 'from')
+        fromDir = from.dir
+        fromLabel = `v${from.resolved}`
       } else {
-        // Compare two published versions
         if (!opts.from) {
-          // Get version list to find previous version
           const data = await apiRequest('GET', `/v1/bundles/${owner}/${slug}`)
           const versions = (data.versions || []).map((v: any) => v.version).sort()
           if (versions.length < 2 && !opts.to) {
@@ -1138,31 +1150,13 @@ program
         }
         if (!opts.to) opts.to = 'latest'
 
-        console.log(`📥 Pulling ${owner}/${slug}@${opts.from}...`)
-        const fromRes = await apiRequest('GET', `/v1/bundles/${owner}/${slug}/${opts.from}/download`)
-        fromLabel = `v${fromRes.version}`
-        fromDir = path.join(tmpBase, 'from')
-        fs.mkdirSync(fromDir, { recursive: true })
-        const fromTar = path.join(tmpBase, 'from.tar.gz')
-        const fromDl = await fetch(fromRes.url)
-        if (!fromDl.ok) throw new Error(`Download failed: ${fromDl.status}`)
-        fs.writeFileSync(fromTar, Buffer.from(await fromDl.arrayBuffer()))
-        execSync(`tar xzf "${fromTar}" -C "${fromDir}"`, { stdio: 'pipe' })
-        const fromSub = fs.readdirSync(fromDir).filter(f => fs.statSync(path.join(fromDir, f)).isDirectory())
-        if (fromSub.length === 1) fromDir = path.join(fromDir, fromSub[0])
+        const from = await resolveVersion(opts.from, 'from')
+        fromDir = from.dir
+        fromLabel = `v${from.resolved}`
 
-        console.log(`📥 Pulling ${owner}/${slug}@${opts.to}...`)
-        const toRes = await apiRequest('GET', `/v1/bundles/${owner}/${slug}/${opts.to}/download`)
-        toLabel = `v${toRes.version}`
-        toDir = path.join(tmpBase, 'to')
-        fs.mkdirSync(toDir, { recursive: true })
-        const toTar = path.join(tmpBase, 'to.tar.gz')
-        const toDl = await fetch(toRes.url)
-        if (!toDl.ok) throw new Error(`Download failed: ${toDl.status}`)
-        fs.writeFileSync(toTar, Buffer.from(await toDl.arrayBuffer()))
-        execSync(`tar xzf "${toTar}" -C "${toDir}"`, { stdio: 'pipe' })
-        const toSub = fs.readdirSync(toDir).filter(f => fs.statSync(path.join(toDir, f)).isDirectory())
-        if (toSub.length === 1) toDir = path.join(toDir, toSub[0])
+        const to = await resolveVersion(opts.to, 'to')
+        toDir = to.dir
+        toLabel = `v${to.resolved}`
       }
 
       // Run diff
@@ -1217,29 +1211,18 @@ program
             // Simple line-by-line diff
             const fromLines = fromContent.split('\n')
             const toLines = toContent.split('\n')
-            const maxShow = 15
-            let shown = 0
-
-            // Find changed lines
             const maxLen = Math.max(fromLines.length, toLines.length)
-            for (let i = 0; i < maxLen && shown < maxShow; i++) {
+            for (let i = 0; i < maxLen; i++) {
               const fl = fromLines[i]
               const tl = toLines[i]
               if (fl !== tl) {
                 if (fl !== undefined && (tl === undefined || fl !== tl)) {
                   console.log(chalk.red(`  - ${fl}`))
-                  shown++
                 }
                 if (tl !== undefined && (fl === undefined || fl !== tl)) {
                   console.log(chalk.green(`  + ${tl}`))
-                  shown++
                 }
               }
-            }
-            if (shown >= maxShow) {
-              const totalChanges = fromLines.filter((l, i) => l !== toLines[i]).length +
-                Math.abs(fromLines.length - toLines.length)
-              console.log(chalk.dim(`  ... (${totalChanges}+ more changes)`))
             }
             console.log()
           }
