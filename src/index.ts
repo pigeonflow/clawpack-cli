@@ -1254,7 +1254,20 @@ program
       console.error('❌ Invalid format. Use: owner/slug or owner/slug@version')
       process.exit(1)
     }
-    const [, owner, slug, version] = match
+    const [, owner, slug] = match
+
+    // Check local installed version
+    let localVersion: string | null = null
+    const installedManifest = path.join(CONFIG_DIR, 'agents', owner, slug, 'workspace', 'manifest.json')
+    const cachedManifest = path.join(CONFIG_DIR, 'bundles', owner, slug, 'manifest.json')
+    for (const p of [installedManifest, cachedManifest]) {
+      if (fs.existsSync(p)) {
+        try {
+          localVersion = JSON.parse(fs.readFileSync(p, 'utf-8')).version
+          break
+        } catch {}
+      }
+    }
 
     try {
       const data = await apiRequest('GET', `/v1/bundles/${owner}/${slug}`)
@@ -1264,7 +1277,12 @@ program
       const latest = versions[0]
 
       console.log()
-      console.log(`  ${chalk.bold(`${owner}/${slug}`)}  v${latest?.version || '?'}`)
+      const versionInfo = localVersion
+        ? localVersion === latest?.version
+          ? chalk.green(`v${localVersion} (latest)`)
+          : chalk.yellow(`v${localVersion}`) + chalk.dim(` → v${latest?.version} available`)
+        : `v${latest?.version || '?'}`
+      console.log(`  ${chalk.bold(`${owner}/${slug}`)}  ${versionInfo}`)
       if (data.description) console.log(`  ${chalk.dim(data.description)}`)
       console.log()
       console.log(`  ${chalk.dim('Downloads:')}  ${data.download_count || 0}`)
@@ -1274,15 +1292,106 @@ program
       console.log(`  ${chalk.dim('Created:')}   ${new Date(data.created_at).toLocaleDateString()}`)
       if (latest) console.log(`  ${chalk.dim('Updated:')}   ${new Date(latest.created_at).toLocaleDateString()}`)
 
-      if (versions.length > 1) {
+      if (versions.length > 0) {
         console.log()
         console.log(`  ${chalk.dim('Versions:')}`)
         for (const v of versions.slice(0, 10)) {
-          console.log(`    ${v.version}  ${chalk.dim(new Date(v.created_at).toLocaleDateString())}${v.changelog ? '  ' + v.changelog : ''}`)
+          const isCurrent = localVersion === v.version
+          const marker = isCurrent ? chalk.green(' ◀ installed') : ''
+          console.log(`    ${v.version}  ${chalk.dim(new Date(v.created_at).toLocaleDateString())}${v.changelog ? '  ' + v.changelog : ''}${marker}`)
         }
         if (versions.length > 10) console.log(chalk.dim(`    ... and ${versions.length - 10} more`))
       }
+
+      if (localVersion && localVersion !== latest?.version) {
+        console.log()
+        console.log(`  💡 Run ${chalk.cyan(`clawpack use ${owner}/${slug}@${latest?.version}`)} to switch to latest`)
+      }
       console.log()
+    } catch (err: any) {
+      console.error(`❌ ${err.message}`)
+      process.exit(1)
+    }
+  })
+
+program
+  .command('use <bundle>')
+  .description('Switch an installed agent to a specific version')
+  .action(async (bundle: string) => {
+    const match = bundle.match(/^([^/]+)\/([^@]+)@(.+)$/)
+    if (!match) {
+      console.error('❌ Specify a version: clawpack use owner/slug@version')
+      process.exit(1)
+    }
+    const [, owner, slug, version] = match
+
+    const workspaceDir = path.join(CONFIG_DIR, 'agents', owner, slug, 'workspace')
+    const bundlesCacheDir = path.join(CONFIG_DIR, 'bundles', owner, slug)
+
+    // Check current version
+    let currentVersion: string | null = null
+    for (const dir of [workspaceDir, bundlesCacheDir]) {
+      const mPath = path.join(dir, 'manifest.json')
+      if (fs.existsSync(mPath)) {
+        try { currentVersion = JSON.parse(fs.readFileSync(mPath, 'utf-8')).version } catch {}
+        break
+      }
+    }
+
+    if (currentVersion === version) {
+      console.log(`✅ Already on v${version}`)
+      return
+    }
+
+    console.log(`📥 Pulling ${owner}/${slug}@${version}...`)
+    try {
+      const { url, version: resolved } = await apiRequest(
+        'GET',
+        `/v1/bundles/${owner}/${slug}/${version}/download`
+      )
+
+      const tmpFile = path.join(os.tmpdir(), `clawpack-use-${Date.now()}.tar.gz`)
+      const dl = await fetch(url)
+      if (!dl.ok) throw new Error(`Download failed: ${dl.status}`)
+      fs.writeFileSync(tmpFile, Buffer.from(await dl.arrayBuffer()))
+
+      // Update installed agent workspace if it exists
+      if (fs.existsSync(workspaceDir)) {
+        // Back up memory/ if it exists
+        const memDir = path.join(workspaceDir, 'memory')
+        const memBackup = path.join(os.tmpdir(), `clawpack-mem-${Date.now()}`)
+        const hasMemory = fs.existsSync(memDir)
+        if (hasMemory) {
+          fs.cpSync(memDir, memBackup, { recursive: true })
+        }
+
+        // Clear and re-extract
+        fs.rmSync(workspaceDir, { recursive: true, force: true })
+        fs.mkdirSync(workspaceDir, { recursive: true })
+        await tar.extract({ file: tmpFile, cwd: workspaceDir, strip: 1 })
+
+        // Restore memory
+        if (hasMemory) {
+          fs.cpSync(memBackup, memDir, { recursive: true })
+          fs.rmSync(memBackup, { recursive: true, force: true })
+        }
+
+        console.log(`✅ ${owner}/${slug} switched to v${resolved}`)
+        console.log(`   Workspace: ${workspaceDir}`)
+        if (hasMemory) console.log(`   Memory preserved ✓`)
+      } else {
+        // Just update the bundles cache
+        fs.mkdirSync(bundlesCacheDir, { recursive: true })
+        // Clear old files
+        for (const f of fs.readdirSync(bundlesCacheDir)) {
+          fs.rmSync(path.join(bundlesCacheDir, f), { recursive: true, force: true })
+        }
+        await tar.extract({ file: tmpFile, cwd: bundlesCacheDir, strip: 1 })
+        console.log(`✅ ${owner}/${slug} updated to v${resolved}`)
+        console.log(`   Cache: ${bundlesCacheDir}`)
+      }
+
+      fs.unlinkSync(tmpFile)
     } catch (err: any) {
       console.error(`❌ ${err.message}`)
       process.exit(1)
