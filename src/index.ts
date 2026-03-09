@@ -9,37 +9,7 @@ import { pipeline } from 'stream/promises'
 import { createGzip, createGunzip } from 'zlib'
 import { createRequire } from 'module'
 import { execSync, spawnSync } from 'child_process'
-
-const _isWindows = process.platform === 'win32'
-
-function resolveOpenclawBin(): string {
-  try {
-    const result = _isWindows
-      ? execSync('where openclaw.cmd', { encoding: 'utf-8' }).trim().split('\n')[0].trim()
-      : execSync('which openclaw', { encoding: 'utf-8' }).trim()
-    if (result) return result
-  } catch {}
-  return _isWindows ? 'openclaw.cmd' : 'openclaw'
-}
-
-const OPENCLAW_BIN = resolveOpenclawBin()
-
-function oc(...args: string[]): string {
-  const result = spawnSync(OPENCLAW_BIN, args, {
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 35000,
-  })
-  if (result.error) throw result.error
-  return (result.stdout || '').trim()
-}
-
-function ocInherit(...args: string[]): void {
-  spawnSync(OPENCLAW_BIN, args, {
-    stdio: ['ignore', 'inherit', 'inherit'],
-    timeout: 35000,
-  })
-}
+import { OC_BIN, oc, ocInherit } from './oc.js'
 
 const require = createRequire(import.meta.url)
 const PKG_VERSION: string = require('../package.json').version
@@ -535,7 +505,7 @@ program
         if (found) {
           runtimeBin = found
           try {
-            const vResult = spawnSync(OPENCLAW_BIN, ['--version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+            const vResult = spawnSync(OC_BIN.cmd, [...OC_BIN.baseArgs, '--version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
             const ver = (vResult.stdout || '').trim()
             console.log(`   Found openclaw ${ver}`)
           } catch {

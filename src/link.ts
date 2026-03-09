@@ -1,39 +1,9 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { execSync, spawnSync } from 'child_process'
+import { oc, ocInherit } from './oc.js'
 
 const isWindows = process.platform === 'win32'
-
-function resolveOpenclawBin(): string {
-  try {
-    const result = isWindows
-      ? execSync('where openclaw.cmd', { encoding: 'utf-8' }).trim().split('\n')[0].trim()
-      : execSync('which openclaw', { encoding: 'utf-8' }).trim()
-    if (result) return result
-  } catch {}
-  return isWindows ? 'openclaw.cmd' : 'openclaw'
-}
-
-const OPENCLAW_BIN = resolveOpenclawBin()
-
-function oc(...args: string[]): string {
-  const result = spawnSync(OPENCLAW_BIN, args, {
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 35000,
-  })
-  if (result.error) throw result.error
-  if (result.status !== 0) throw new Error((result.stderr || '').trim() || `openclaw exited with code ${result.status}`)
-  return (result.stdout || '').trim()
-}
-
-function ocInherit(...args: string[]): void {
-  spawnSync(OPENCLAW_BIN, args, {
-    stdio: ['ignore', 'inherit', 'inherit'],
-    timeout: 35000,
-  })
-}
 
 interface LinkOptions {
   name?: string        // Override agent name (default: derived from manifest or dir name)

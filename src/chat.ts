@@ -2,24 +2,11 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
-import { execSync, spawnSync, spawn } from 'child_process'
+import { spawn } from 'child_process'
+import { OC_BIN, isOpenclawInstalled, oc } from './oc.js'
 
 const BUNDLES_DIR = path.join(os.homedir(), '.clawpack', 'bundles')
 const CONFIG_FILE = path.join(os.homedir(), '.clawpack', 'config.json')
-
-/** Resolve the full path to the openclaw binary, including .cmd on Windows */
-function resolveOpenclawBin(): string {
-  const isWindows = process.platform === 'win32'
-  try {
-    const result = isWindows
-      ? execSync('where openclaw.cmd', { encoding: 'utf-8' }).trim().split('\n')[0].trim()
-      : execSync('which openclaw', { encoding: 'utf-8' }).trim()
-    if (result) return result
-  } catch {}
-  return isWindows ? 'openclaw.cmd' : 'openclaw'
-}
-
-const OPENCLAW_BIN = resolveOpenclawBin()
 
 interface BundleManifest {
   name: string
@@ -49,25 +36,6 @@ function findBundle(ownerSlug: string): { dir: string; manifest: BundleManifest 
   if (!fs.existsSync(manifestPath)) return null
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
   return { dir, manifest }
-}
-
-function isOpenclawInstalled(): boolean {
-  const result = spawnSync(OPENCLAW_BIN, ['--version'], {
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  return !result.error && result.status === 0
-}
-
-/** Run `openclaw <args>` synchronously */
-function oc(...args: string[]): string {
-  const result = spawnSync(OPENCLAW_BIN, args, {
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 10000,
-  })
-  if (result.error) throw result.error
-  return (result.stdout || '').trim()
 }
 
 function getAgentCount(): number {
@@ -288,7 +256,7 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
       const args = ['agent', '--local', '--agent', agentId, '--session-id', sessionId, '-m', message, '--json']
       if (opts.model) args.push('--model', opts.model)
 
-      const child = spawn(OPENCLAW_BIN, args, {
+      const child = spawn(OC_BIN.cmd, [...OC_BIN.baseArgs, ...args], {
         stdio: ['ignore', 'pipe', 'pipe'],
       })
 

@@ -1,34 +1,13 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { execSync, spawnSync } from 'child_process'
+import { spawnSync } from 'child_process'
+import { OC_BIN, oc } from './oc.js'
 import { linkAgent } from './link.js'
 
 const isWindows = process.platform === 'win32'
 const CONFIG_DIR = path.join(os.homedir(), '.clawpack')
 const STATE_FILE = path.join(CONFIG_DIR, '.parasite-state.json')
-
-function resolveOpenclawBin(): string {
-  try {
-    const result = isWindows
-      ? execSync('where openclaw.cmd', { encoding: 'utf-8' }).trim().split('\n')[0].trim()
-      : execSync('which openclaw', { encoding: 'utf-8' }).trim()
-    if (result) return result
-  } catch {}
-  return isWindows ? 'openclaw.cmd' : 'openclaw'
-}
-
-const OPENCLAW_BIN = resolveOpenclawBin()
-
-function oc(...args: string[]): string {
-  const result = spawnSync(OPENCLAW_BIN, args, {
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 15000,
-  })
-  if (result.error) throw result.error
-  return (result.stdout || '').trim()
-}
 
 interface ParasiteSession {
   parasiteAgentId: string
@@ -68,7 +47,7 @@ function writeOpenClawConfig(config: any): void {
 function restartGateway(): void {
   console.log('   🔄 Restarting gateway...')
   try {
-    spawnSync(OPENCLAW_BIN, ['gateway', 'restart'], {
+    spawnSync(OC_BIN.cmd, [...OC_BIN.baseArgs, 'gateway', 'restart'], {
       stdio: 'pipe',
       timeout: 15000,
     })
