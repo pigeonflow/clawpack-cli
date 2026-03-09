@@ -2,14 +2,13 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
-import { spawnSync, spawn } from 'child_process'
+import { execSync, spawnSync, spawn } from 'child_process'
 
 const BUNDLES_DIR = path.join(os.homedir(), '.clawpack', 'bundles')
 const CONFIG_FILE = path.join(os.homedir(), '.clawpack', 'config.json')
 
 /** Resolve the full path to the openclaw binary, including .cmd on Windows */
 function resolveOpenclawBin(): string {
-  const { execSync } = require('child_process')
   const isWindows = process.platform === 'win32'
   try {
     const result = isWindows
@@ -17,7 +16,6 @@ function resolveOpenclawBin(): string {
       : execSync('which openclaw', { encoding: 'utf-8' }).trim()
     if (result) return result
   } catch {}
-  // fallback
   return isWindows ? 'openclaw.cmd' : 'openclaw'
 }
 
