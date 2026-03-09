@@ -38,12 +38,11 @@ function findBundle(ownerSlug: string): { dir: string; manifest: BundleManifest 
 }
 
 function isOpenclawInstalled(): boolean {
-  try {
-    execSync('openclaw --version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
-    return true
-  } catch {
-    return false
-  }
+  const result = crossSpawn.sync('openclaw', ['--version'], {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  return !result.error && result.status === 0
 }
 
 /** Run `openclaw <args>` synchronously — cross-spawn handles .cmd shims on Windows */
