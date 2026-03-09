@@ -1,6 +1,6 @@
 {
   "name": "@clawpack/cli",
-  "version": "0.11.6",
+  "version": "0.11.7",
   "description": "CLI for ClawPack — the agent registry",
   "bin": {
     "clawpack": "bin/clawpack"
