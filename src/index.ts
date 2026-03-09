@@ -9,6 +9,7 @@ import { pipeline } from 'stream/promises'
 import { createGzip, createGunzip } from 'zlib'
 import { createRequire } from 'module'
 import { execSync, spawnSync } from 'child_process'
+import chalk from 'chalk'
 import { OC_BIN, oc, ocInherit } from './oc.js'
 
 const require = createRequire(import.meta.url)
@@ -1069,6 +1070,196 @@ program
     console.log(`   cd ${name}`)
     console.log(`   # Edit SOUL.md to refine your agent's personality`)
     console.log(`   clawpack push`)
+  })
+
+program
+  .command('diff <bundle>')
+  .description('Compare two versions of an agent bundle')
+  .option('--from <version>', 'Base version to compare from')
+  .option('--to <version>', 'Target version to compare to (default: latest)')
+  .option('--local', 'Compare local working copy against a published version')
+  .action(async (bundle: string, opts) => {
+    const match = bundle.match(/^([^/]+)\/([^@]+)$/)
+    if (!match) {
+      console.error('❌ Invalid bundle format. Use: owner/slug')
+      process.exit(1)
+    }
+
+    const [, owner, slug] = match
+    const tmpBase = path.join(os.tmpdir(), `clawpack-diff-${Date.now()}`)
+
+    try {
+      // Determine versions to compare
+      let fromDir: string
+      let toDir: string
+      let fromLabel: string
+      let toLabel: string
+
+      if (opts.local) {
+        // Compare local working copy against a published version
+        const localDir = path.resolve('.')
+        const localManifest = path.join(localDir, 'manifest.json')
+        if (!fs.existsSync(localManifest)) {
+          console.error('❌ No manifest.json found in current directory')
+          process.exit(1)
+        }
+        toDir = localDir
+        toLabel = 'local'
+
+        const compareVer = opts.from || opts.to || 'latest'
+        console.log(`📥 Pulling ${owner}/${slug}@${compareVer} for comparison...`)
+        const { url, version: resolvedFrom } = await apiRequest(
+          'GET',
+          `/v1/bundles/${owner}/${slug}/${compareVer}/download`
+        )
+        fromLabel = `v${resolvedFrom}`
+        fromDir = path.join(tmpBase, 'from')
+        fs.mkdirSync(fromDir, { recursive: true })
+        const res = await fetch(url)
+        if (!res.ok) throw new Error(`Download failed: ${res.status}`)
+        const tarPath = path.join(tmpBase, 'from.tar.gz')
+        fs.writeFileSync(tarPath, Buffer.from(await res.arrayBuffer()))
+        execSync(`tar xzf "${tarPath}" -C "${fromDir}"`, { stdio: 'pipe' })
+        // Tarballs extract into a subdirectory — find it
+        const fromSub = fs.readdirSync(fromDir).filter(f => fs.statSync(path.join(fromDir, f)).isDirectory())
+        if (fromSub.length === 1) fromDir = path.join(fromDir, fromSub[0])
+      } else {
+        // Compare two published versions
+        if (!opts.from) {
+          // Get version list to find previous version
+          const data = await apiRequest('GET', `/v1/bundles/${owner}/${slug}`)
+          const versions = (data.versions || []).map((v: any) => v.version).sort()
+          if (versions.length < 2 && !opts.to) {
+            console.error('❌ Only one version exists. Use --from and --to, or --local')
+            process.exit(1)
+          }
+          opts.to = opts.to || versions[versions.length - 1]
+          opts.from = versions[versions.length - 2]
+        }
+        if (!opts.to) opts.to = 'latest'
+
+        console.log(`📥 Pulling ${owner}/${slug}@${opts.from}...`)
+        const fromRes = await apiRequest('GET', `/v1/bundles/${owner}/${slug}/${opts.from}/download`)
+        fromLabel = `v${fromRes.version}`
+        fromDir = path.join(tmpBase, 'from')
+        fs.mkdirSync(fromDir, { recursive: true })
+        const fromTar = path.join(tmpBase, 'from.tar.gz')
+        const fromDl = await fetch(fromRes.url)
+        if (!fromDl.ok) throw new Error(`Download failed: ${fromDl.status}`)
+        fs.writeFileSync(fromTar, Buffer.from(await fromDl.arrayBuffer()))
+        execSync(`tar xzf "${fromTar}" -C "${fromDir}"`, { stdio: 'pipe' })
+        const fromSub = fs.readdirSync(fromDir).filter(f => fs.statSync(path.join(fromDir, f)).isDirectory())
+        if (fromSub.length === 1) fromDir = path.join(fromDir, fromSub[0])
+
+        console.log(`📥 Pulling ${owner}/${slug}@${opts.to}...`)
+        const toRes = await apiRequest('GET', `/v1/bundles/${owner}/${slug}/${opts.to}/download`)
+        toLabel = `v${toRes.version}`
+        toDir = path.join(tmpBase, 'to')
+        fs.mkdirSync(toDir, { recursive: true })
+        const toTar = path.join(tmpBase, 'to.tar.gz')
+        const toDl = await fetch(toRes.url)
+        if (!toDl.ok) throw new Error(`Download failed: ${toDl.status}`)
+        fs.writeFileSync(toTar, Buffer.from(await toDl.arrayBuffer()))
+        execSync(`tar xzf "${toTar}" -C "${toDir}"`, { stdio: 'pipe' })
+        const toSub = fs.readdirSync(toDir).filter(f => fs.statSync(path.join(toDir, f)).isDirectory())
+        if (toSub.length === 1) toDir = path.join(toDir, toSub[0])
+      }
+
+      // Run diff
+      console.log(`\n📋 Diff: ${owner}/${slug} ${fromLabel} → ${toLabel}\n`)
+      console.log('─'.repeat(60))
+
+      // Collect all files from both dirs
+      const collectFiles = (dir: string, prefix = ''): string[] => {
+        const entries = fs.readdirSync(dir, { withFileTypes: true })
+        let files: string[] = []
+        for (const e of entries) {
+          const rel = prefix ? `${prefix}/${e.name}` : e.name
+          if (e.name === '.git' || e.name === 'node_modules' || e.name === 'tickets.db' || e.name === '.gitkeep') continue
+          if (e.isDirectory()) {
+            files = files.concat(collectFiles(path.join(dir, e.name), rel))
+          } else {
+            files.push(rel)
+          }
+        }
+        return files
+      }
+
+      const fromFiles = new Set(collectFiles(fromDir))
+      const toFiles = new Set(collectFiles(toDir))
+      const allFiles = new Set([...fromFiles, ...toFiles])
+      let hasChanges = false
+
+      for (const file of [...allFiles].sort()) {
+        const fromPath = path.join(fromDir, file)
+        const toPath = path.join(toDir, file)
+
+        if (!fromFiles.has(file)) {
+          hasChanges = true
+          console.log(chalk.green(`+ Added: ${file}`))
+          const content = fs.readFileSync(toPath, 'utf-8')
+          for (const line of content.split('\n').slice(0, 5)) {
+            console.log(chalk.green(`  + ${line}`))
+          }
+          if (content.split('\n').length > 5) console.log(chalk.dim(`  ... (${content.split('\n').length} lines total)`))
+          console.log()
+        } else if (!toFiles.has(file)) {
+          hasChanges = true
+          console.log(chalk.red(`- Removed: ${file}`))
+          console.log()
+        } else {
+          const fromContent = fs.readFileSync(fromPath, 'utf-8')
+          const toContent = fs.readFileSync(toPath, 'utf-8')
+          if (fromContent !== toContent) {
+            hasChanges = true
+            console.log(chalk.yellow(`~ Modified: ${file}`))
+
+            // Simple line-by-line diff
+            const fromLines = fromContent.split('\n')
+            const toLines = toContent.split('\n')
+            const maxShow = 15
+            let shown = 0
+
+            // Find changed lines
+            const maxLen = Math.max(fromLines.length, toLines.length)
+            for (let i = 0; i < maxLen && shown < maxShow; i++) {
+              const fl = fromLines[i]
+              const tl = toLines[i]
+              if (fl !== tl) {
+                if (fl !== undefined && (tl === undefined || fl !== tl)) {
+                  console.log(chalk.red(`  - ${fl}`))
+                  shown++
+                }
+                if (tl !== undefined && (fl === undefined || fl !== tl)) {
+                  console.log(chalk.green(`  + ${tl}`))
+                  shown++
+                }
+              }
+            }
+            if (shown >= maxShow) {
+              const totalChanges = fromLines.filter((l, i) => l !== toLines[i]).length +
+                Math.abs(fromLines.length - toLines.length)
+              console.log(chalk.dim(`  ... (${totalChanges}+ more changes)`))
+            }
+            console.log()
+          }
+        }
+      }
+
+      if (!hasChanges) {
+        console.log(chalk.dim('No differences found.'))
+      }
+
+      console.log('─'.repeat(60))
+    } catch (err: any) {
+      console.error(`❌ ${err.message}`)
+      process.exit(1)
+    } finally {
+      // Cleanup temp files
+      if (fs.existsSync(tmpBase)) {
+        fs.rmSync(tmpBase, { recursive: true, force: true })
+      }
+    }
   })
 
 program.parse()
