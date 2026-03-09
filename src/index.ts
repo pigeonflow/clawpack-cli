@@ -8,11 +8,24 @@ import { createWriteStream, createReadStream } from 'fs'
 import { pipeline } from 'stream/promises'
 import { createGzip, createGunzip } from 'zlib'
 import { createRequire } from 'module'
-import crossSpawn from 'cross-spawn'
+import { execSync, spawnSync } from 'child_process'
 
-/** Run `openclaw <args>` synchronously — cross-spawn handles .cmd shims on Windows */
+const _isWindows = process.platform === 'win32'
+
+function resolveOpenclawBin(): string {
+  try {
+    const result = _isWindows
+      ? execSync('where openclaw.cmd', { encoding: 'utf-8' }).trim().split('\n')[0].trim()
+      : execSync('which openclaw', { encoding: 'utf-8' }).trim()
+    if (result) return result
+  } catch {}
+  return _isWindows ? 'openclaw.cmd' : 'openclaw'
+}
+
+const OPENCLAW_BIN = resolveOpenclawBin()
+
 function oc(...args: string[]): string {
-  const result = crossSpawn.sync('openclaw', args, {
+  const result = spawnSync(OPENCLAW_BIN, args, {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 35000,
@@ -21,9 +34,8 @@ function oc(...args: string[]): string {
   return (result.stdout || '').trim()
 }
 
-/** Run `openclaw <args>` with stdio:inherit */
 function ocInherit(...args: string[]): void {
-  crossSpawn.sync('openclaw', args, {
+  spawnSync(OPENCLAW_BIN, args, {
     stdio: ['ignore', 'inherit', 'inherit'],
     timeout: 35000,
   })
@@ -523,7 +535,7 @@ program
         if (found) {
           runtimeBin = found
           try {
-            const vResult = crossSpawn.sync('openclaw', ['--version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+            const vResult = spawnSync(OPENCLAW_BIN, ['--version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
             const ver = (vResult.stdout || '').trim()
             console.log(`   Found openclaw ${ver}`)
           } catch {

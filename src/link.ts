@@ -1,14 +1,24 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { execSync } from 'child_process'
-import crossSpawn from 'cross-spawn'
+import { execSync, spawnSync } from 'child_process'
 
 const isWindows = process.platform === 'win32'
 
-/** Run `openclaw <args>` synchronously — cross-spawn handles .cmd shims on Windows */
+function resolveOpenclawBin(): string {
+  try {
+    const result = isWindows
+      ? execSync('where openclaw.cmd', { encoding: 'utf-8' }).trim().split('\n')[0].trim()
+      : execSync('which openclaw', { encoding: 'utf-8' }).trim()
+    if (result) return result
+  } catch {}
+  return isWindows ? 'openclaw.cmd' : 'openclaw'
+}
+
+const OPENCLAW_BIN = resolveOpenclawBin()
+
 function oc(...args: string[]): string {
-  const result = crossSpawn.sync('openclaw', args, {
+  const result = spawnSync(OPENCLAW_BIN, args, {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 35000,
@@ -18,14 +28,11 @@ function oc(...args: string[]): string {
   return (result.stdout || '').trim()
 }
 
-/** Run `openclaw <args>` with stdio:inherit (for commands that print to terminal) */
 function ocInherit(...args: string[]): void {
-  const result = crossSpawn.sync('openclaw', args, {
-    encoding: 'utf-8',
+  spawnSync(OPENCLAW_BIN, args, {
     stdio: ['ignore', 'inherit', 'inherit'],
     timeout: 35000,
   })
-  if (result.error) throw result.error
 }
 
 interface LinkOptions {
