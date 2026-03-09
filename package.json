@@ -17,6 +17,7 @@
     "boxen": "^8.0.1",
     "chalk": "^5.0.0",
     "commander": "^13.0.0",
+    "cross-spawn": "^7.0.6",
     "figlet": "^1.10.0",
     "glob": "^11.0.0",
     "gradient-string": "^3.0.0",
@@ -24,6 +25,7 @@
     "tar": "^7.0.0"
   },
   "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@types/figlet": "^1.7.0",
     "@types/node": "^22.0.0",
     "@types/tar": "^6.1.0",

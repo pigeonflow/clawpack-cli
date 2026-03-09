@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
-import { execSync, spawnSync } from 'child_process'
+import crossSpawn from 'cross-spawn'
 
 const BUNDLES_DIR = path.join(os.homedir(), '.clawpack', 'bundles')
 const CONFIG_FILE = path.join(os.homedir(), '.clawpack', 'config.json')
@@ -46,10 +46,9 @@ function isOpenclawInstalled(): boolean {
   }
 }
 
-/** Run `openclaw <args>` synchronously via shell — works cross-platform with .cmd shims */
+/** Run `openclaw <args>` synchronously — cross-spawn handles .cmd shims on Windows */
 function oc(...args: string[]): string {
-  const cmd = process.platform === 'win32' ? 'openclaw.cmd' : 'openclaw'
-  const result = spawnSync(cmd, args, {
+  const result = crossSpawn.sync('openclaw', args, {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 10000,
@@ -275,12 +274,9 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
     const args = ['agent', '--local', '--agent', agentId, '--session-id', sessionId, '-m', message, '--json']
     if (opts.model) args.push('--model', opts.model)
 
-    // Use spawnSync with stdio: ['ignore', 'pipe', 'pipe'] and shell: false so
-    // the child process never touches the parent's stdin stream, and message
-    // content (pipes, colons, special chars) is never interpreted by the shell.
-    // On Windows, use openclaw.cmd so Node can resolve the .cmd shim without shell.
-    const cmd = process.platform === 'win32' ? 'openclaw.cmd' : 'openclaw'
-    const result = spawnSync(cmd, args, {
+    // cross-spawn handles .cmd shims on Windows without shell:true, so args are
+    // never interpreted by cmd.exe (no | : > breakage) and stdin is isolated.
+    const result = crossSpawn.sync('openclaw', args, {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 120000,
