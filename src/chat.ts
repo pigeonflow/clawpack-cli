@@ -272,16 +272,21 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
 
       const escaped = args.map(a => `"${a.replace(/"/g, '\\"')}"`).join(' ')
 
+      // Pause readline so child process doesn't interfere with stdin
+      rl.pause()
+
       let stdout = ''
       let stderr = ''
       const child = spawn(`openclaw ${escaped}`, {
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         shell: true,
       } as any)
+      child.stdin!.end()
       child.stdout!.on('data', (d: Buffer) => { stdout += d.toString() })
       child.stderr!.on('data', (d: Buffer) => { stderr += d.toString() })
-      child.on('error', reject)
+      child.on('error', (err) => { rl.resume(); reject(err) })
       child.on('close', (code) => {
+        rl.resume()
         if (code !== 0 && !stdout.trim()) {
           reject(new Error(stderr.trim() || `openclaw exited with code ${code}`))
         } else {
@@ -351,7 +356,12 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
 
   const closeHandler = () => {
     // On Windows, readline can close unexpectedly (e.g. after child process).
-    // Recreate it to keep the chat alive. /exit and /quit call process.exit() directly.
+    // Only recreate if stdin is still alive.
+    if (process.stdin.destroyed || process.stdin.readableEnded) {
+      cleanup()
+      process.exit(0)
+      return
+    }
     rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
