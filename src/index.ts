@@ -1357,28 +1357,32 @@ program
 
       // Update installed agent workspace if it exists
       if (fs.existsSync(workspaceDir)) {
-        // Back up memory/ if it exists
-        const memDir = path.join(workspaceDir, 'memory')
-        const memBackup = path.join(os.tmpdir(), `clawpack-mem-${Date.now()}`)
-        const hasMemory = fs.existsSync(memDir)
-        if (hasMemory) {
-          fs.cpSync(memDir, memBackup, { recursive: true })
-        }
+        // Extract to temp dir first
+        const tmpExtract = path.join(os.tmpdir(), `clawpack-extract-${Date.now()}`)
+        fs.mkdirSync(tmpExtract, { recursive: true })
+        await tar.extract({ file: tmpFile, cwd: tmpExtract, strip: 1 })
 
-        // Clear and re-extract
-        fs.rmSync(workspaceDir, { recursive: true, force: true })
-        fs.mkdirSync(workspaceDir, { recursive: true })
-        await tar.extract({ file: tmpFile, cwd: workspaceDir, strip: 1 })
-
-        // Restore memory
-        if (hasMemory) {
-          fs.cpSync(memBackup, memDir, { recursive: true })
-          fs.rmSync(memBackup, { recursive: true, force: true })
+        // Copy new files over existing workspace (skip memory/)
+        const copyOver = (src: string, dest: string) => {
+          const entries = fs.readdirSync(src, { withFileTypes: true })
+          for (const entry of entries) {
+            if (entry.name === 'memory') continue // preserve existing memory
+            const srcPath = path.join(src, entry.name)
+            const destPath = path.join(dest, entry.name)
+            if (entry.isDirectory()) {
+              fs.mkdirSync(destPath, { recursive: true })
+              copyOver(srcPath, destPath)
+            } else {
+              fs.copyFileSync(srcPath, destPath)
+            }
+          }
         }
+        copyOver(tmpExtract, workspaceDir)
+        fs.rmSync(tmpExtract, { recursive: true, force: true })
 
         console.log(`✅ ${owner}/${slug} switched to v${resolved}`)
         console.log(`   Workspace: ${workspaceDir}`)
-        if (hasMemory) console.log(`   Memory preserved ✓`)
+        console.log(`   Memory preserved ✓`)
       } else {
         // Just update the bundles cache
         fs.mkdirSync(bundlesCacheDir, { recursive: true })
