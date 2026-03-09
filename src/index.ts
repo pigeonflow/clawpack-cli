@@ -1245,4 +1245,48 @@ program
     }
   })
 
+program
+  .command('info <bundle>')
+  .description('Show details about a published agent bundle')
+  .action(async (bundle: string) => {
+    const match = bundle.match(/^([^/]+)\/([^@]+)(?:@(.+))?$/)
+    if (!match) {
+      console.error('❌ Invalid format. Use: owner/slug or owner/slug@version')
+      process.exit(1)
+    }
+    const [, owner, slug, version] = match
+
+    try {
+      const data = await apiRequest('GET', `/v1/bundles/${owner}/${slug}`)
+      const versions = (data.versions || []).sort((a: any, b: any) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      )
+      const latest = versions[0]
+
+      console.log()
+      console.log(`  ${chalk.bold(`${owner}/${slug}`)}  v${latest?.version || '?'}`)
+      if (data.description) console.log(`  ${chalk.dim(data.description)}`)
+      console.log()
+      console.log(`  ${chalk.dim('Downloads:')}  ${data.download_count || 0}`)
+      console.log(`  ${chalk.dim('Stars:')}     ${data.star_count || 0}`)
+      console.log(`  ${chalk.dim('Visibility:')} ${data.is_public ? 'Public' : 'Private'}${data.test_mode ? ' (test mode)' : ''}`)
+      if (data.tags?.length) console.log(`  ${chalk.dim('Tags:')}      ${data.tags.join(', ')}`)
+      console.log(`  ${chalk.dim('Created:')}   ${new Date(data.created_at).toLocaleDateString()}`)
+      if (latest) console.log(`  ${chalk.dim('Updated:')}   ${new Date(latest.created_at).toLocaleDateString()}`)
+
+      if (versions.length > 1) {
+        console.log()
+        console.log(`  ${chalk.dim('Versions:')}`)
+        for (const v of versions.slice(0, 10)) {
+          console.log(`    ${v.version}  ${chalk.dim(new Date(v.created_at).toLocaleDateString())}${v.changelog ? '  ' + v.changelog : ''}`)
+        }
+        if (versions.length > 10) console.log(chalk.dim(`    ... and ${versions.length - 10} more`))
+      }
+      console.log()
+    } catch (err: any) {
+      console.error(`❌ ${err.message}`)
+      process.exit(1)
+    }
+  })
+
 program.parse()
