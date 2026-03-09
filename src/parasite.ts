@@ -1,13 +1,24 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { execSync } from 'child_process'
+import crossSpawn from 'cross-spawn'
 import { linkAgent } from './link.js'
 
 const isWindows = process.platform === 'win32'
 const CONFIG_DIR = path.join(os.homedir(), '.clawpack')
 const STATE_FILE = path.join(CONFIG_DIR, '.parasite-state.json')
 const devNull = isWindows ? '2>NUL' : '2>/dev/null'
+
+/** Run `openclaw <args>` synchronously — cross-spawn handles .cmd shims on Windows */
+function oc(...args: string[]): string {
+  const result = crossSpawn.sync('openclaw', args, {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 15000,
+  })
+  if (result.error) throw result.error
+  return (result.stdout || '').trim()
+}
 
 interface ParasiteSession {
   parasiteAgentId: string
@@ -47,10 +58,9 @@ function writeOpenClawConfig(config: any): void {
 function restartGateway(): void {
   console.log('   🔄 Restarting gateway...')
   try {
-    execSync('openclaw gateway restart', {
+    crossSpawn.sync('openclaw', ['gateway', 'restart'], {
       stdio: 'pipe',
       timeout: 15000,
-      shell: isWindows ? 'cmd.exe' : undefined,
     })
     console.log('   ✅ Gateway restarted')
   } catch {
@@ -238,7 +248,7 @@ export async function startParasite(opts: ParasiteOptions): Promise<void> {
 
   // Validate config is clean before proceeding
   try {
-    const doctorOut = execSync(`openclaw doctor --json ${devNull}`, { encoding: 'utf-8', shell: isWindows ? 'cmd.exe' : undefined })
+    const doctorOut = oc('doctor', '--json')
     try {
       const doctor = JSON.parse(doctorOut)
       if (doctor.unknownKeys?.length || doctor.configInvalid) {
@@ -248,9 +258,8 @@ export async function startParasite(opts: ParasiteOptions): Promise<void> {
       }
     } catch {}
   } catch {
-    // doctor command might not support --json, try without
     try {
-      const doctorOut = execSync(`openclaw doctor ${devNull}`, { encoding: 'utf-8', shell: isWindows ? 'cmd.exe' : undefined })
+      const doctorOut = oc('doctor')
       if (doctorOut.includes('Unknown config keys') || doctorOut.includes('Config invalid')) {
         console.error('❌ OpenClaw config has issues. Fix them first:')
         console.error('   openclaw doctor --fix')
@@ -289,7 +298,7 @@ export async function startParasite(opts: ParasiteOptions): Promise<void> {
   if (!opts.noPull) {
     let alreadyLinked = false
     try {
-      const list = execSync(`openclaw agents list --json ${devNull}`, { encoding: 'utf-8', shell: isWindows ? 'cmd.exe' : undefined })
+      const list = oc('agents', 'list', '--json')
       const agents = JSON.parse(list)
       alreadyLinked = agents.some((a: any) => a.id === parasiteAgentId)
     } catch {}

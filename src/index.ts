@@ -8,6 +8,26 @@ import { createWriteStream, createReadStream } from 'fs'
 import { pipeline } from 'stream/promises'
 import { createGzip, createGunzip } from 'zlib'
 import { createRequire } from 'module'
+import crossSpawn from 'cross-spawn'
+
+/** Run `openclaw <args>` synchronously — cross-spawn handles .cmd shims on Windows */
+function oc(...args: string[]): string {
+  const result = crossSpawn.sync('openclaw', args, {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 35000,
+  })
+  if (result.error) throw result.error
+  return (result.stdout || '').trim()
+}
+
+/** Run `openclaw <args>` with stdio:inherit */
+function ocInherit(...args: string[]): void {
+  crossSpawn.sync('openclaw', args, {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    timeout: 35000,
+  })
+}
 
 const require = createRequire(import.meta.url)
 const PKG_VERSION: string = require('../package.json').version
@@ -503,7 +523,8 @@ program
         if (found) {
           runtimeBin = found
           try {
-            const ver = execSync(`openclaw --version ${devNull}`, { encoding: 'utf-8' }).trim()
+            const vResult = crossSpawn.sync('openclaw', ['--version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+            const ver = (vResult.stdout || '').trim()
             console.log(`   Found openclaw ${ver}`)
           } catch {
             console.log(`   Found openclaw at ${found}`)
@@ -641,7 +662,7 @@ program
       // Check if agent already registered, register if not
       let needsRegister = true
       try {
-        const list = execSync(`openclaw agents list --json ${devNull}`, { encoding: 'utf-8', shell: isWindows ? 'cmd.exe' : undefined })
+        const list = oc('agents', 'list', '--json')
         const agents = JSON.parse(list)
         if (agents.find((a: any) => a.name === agentName)) {
           needsRegister = false
@@ -651,14 +672,11 @@ program
       if (needsRegister) {
         console.log(`   Registering agent "${agentName}"...`)
         try {
-          const modelFlag = resolvedModel ? ` --model ${resolvedModel}` : ''
-          execSync(
-            `openclaw agents add ${agentName} --workspace ${workspaceDir}${modelFlag} --non-interactive`,
-            { stdio: 'inherit' }
-          )
+          const addArgs = ['agents', 'add', agentName, '--workspace', workspaceDir, '--non-interactive']
+          if (resolvedModel) addArgs.push('--model', resolvedModel)
+          ocInherit(...addArgs)
         } catch (err: any) {
-          // If it failed because agent already exists, that's fine
-          if (err.message?.includes('already exists') || err.stderr?.includes('already exists')) {
+          if (err.message?.includes('already exists')) {
             console.log(`   Agent "${agentName}" already registered.`)
           } else {
             console.error(`❌ Failed to register agent: ${err.message}`)
@@ -767,18 +785,18 @@ program
     console.log(`Current version: ${PKG_VERSION}`)
     console.log('🔄 Checking for updates...')
     try {
-      const latest = execSync('npm view clawpack version', { encoding: 'utf-8' }).trim()
+      const latest = execSync('npm view @clawpack/cli version', { encoding: 'utf-8' }).trim()
       if (latest === PKG_VERSION) {
         console.log(`✅ Already on latest version (${PKG_VERSION})`)
         return
       }
       console.log(`   New version available: ${latest}`)
       console.log('   Installing...')
-      execSync('npm install -g clawpack@latest', { stdio: 'inherit' })
-      console.log(`✅ Updated to clawpack@${latest}`)
+      execSync('npm install -g @clawpack/cli@latest', { stdio: 'inherit' })
+      console.log(`✅ Updated to @clawpack/cli@${latest}`)
     } catch (err: any) {
       console.error(`❌ Update failed: ${err.message}`)
-      console.error('   Try manually: npm install -g clawpack@latest')
+      console.error('   Try manually: npm install -g @clawpack/cli@latest')
       process.exit(1)
     }
   })

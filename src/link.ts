@@ -2,10 +2,31 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import { execSync } from 'child_process'
+import crossSpawn from 'cross-spawn'
 
 const isWindows = process.platform === 'win32'
-const devNull = isWindows ? '2>NUL' : '2>/dev/null'
-const whichCmd = isWindows ? 'where' : 'which'
+
+/** Run `openclaw <args>` synchronously — cross-spawn handles .cmd shims on Windows */
+function oc(...args: string[]): string {
+  const result = crossSpawn.sync('openclaw', args, {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 35000,
+  })
+  if (result.error) throw result.error
+  if (result.status !== 0) throw new Error((result.stderr || '').trim() || `openclaw exited with code ${result.status}`)
+  return (result.stdout || '').trim()
+}
+
+/** Run `openclaw <args>` with stdio:inherit (for commands that print to terminal) */
+function ocInherit(...args: string[]): void {
+  const result = crossSpawn.sync('openclaw', args, {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'inherit', 'inherit'],
+    timeout: 35000,
+  })
+  if (result.error) throw result.error
+}
 
 interface LinkOptions {
   name?: string        // Override agent name (default: derived from manifest or dir name)
@@ -208,25 +229,23 @@ export function linkAgent(workspaceDir: string, opts: LinkOptions = {}): string 
   // 2. Register with OpenClaw
   let alreadyRegistered = false
   try {
-    const list = execSync(`openclaw agents list --json ${devNull}`, { encoding: 'utf-8', shell: isWindows ? 'cmd.exe' : undefined })
+    const list = oc('agents', 'list', '--json')
     const agents = JSON.parse(list)
     alreadyRegistered = agents.some((a: any) => a.name === agentName || a.id === agentName)
   } catch {}
 
   const resolvedModel = opts.model || manifest?.model || (opts.provider ? `${opts.provider}/claude-sonnet-4` : undefined)
-  const modelFlag = resolvedModel ? ` --model ${resolvedModel}` : ''
 
   if (alreadyRegistered) {
     console.log(`   Agent "${agentName}" already registered, skipping add.`)
   } else {
     try {
-      execSync(
-        `openclaw agents add ${agentName} --workspace "${absDir}"${modelFlag} --non-interactive`,
-        { stdio: 'inherit', shell: isWindows ? 'cmd.exe' : undefined }
-      )
+      const addArgs = ['agents', 'add', agentName, '--workspace', absDir, '--non-interactive']
+      if (resolvedModel) { addArgs.push('--model', resolvedModel) }
+      ocInherit(...addArgs)
       console.log(`   ✅ Registered in OpenClaw`)
     } catch (err: any) {
-      if (err.message?.includes('already exists') || err.stdout?.includes('already exists') || err.stderr?.includes('already exists')) {
+      if (err.message?.includes('already exists')) {
         console.log(`   Agent "${agentName}" already registered.`)
       } else {
         console.error(`❌ Failed to register agent: ${err.message}`)
@@ -252,10 +271,7 @@ export function linkAgent(workspaceDir: string, opts: LinkOptions = {}): string 
   if (!opts.skipHealthCheck) {
     console.log(`   🏥 Running health check...`)
     try {
-      const result = execSync(
-        `openclaw agent --agent ${agentName} -m "Respond with only: OK" --json --timeout 30 ${devNull}`,
-        { encoding: 'utf-8', timeout: 35000, shell: isWindows ? 'cmd.exe' : undefined }
-      )
+      const result = oc('agent', '--agent', agentName, '-m', 'Respond with only: OK', '--json', '--timeout', '30')
       const parsed = JSON.parse(result)
       const text = parsed.payloads?.[0]?.text || ''
       if (text.length > 0) {
@@ -281,10 +297,7 @@ export function unlinkAgent(agentName: string): void {
 
   // 1. Remove from OpenClaw
   try {
-    execSync(
-      `openclaw agents remove ${agentName} --non-interactive`,
-      { stdio: 'inherit', shell: isWindows ? 'cmd.exe' : undefined }
-    )
+    ocInherit('agents', 'remove', agentName, '--non-interactive')
     console.log(`   ✅ Removed from OpenClaw`)
   } catch (err: any) {
     console.warn(`   ⚠️  Could not remove from OpenClaw: ${err.message}`)
