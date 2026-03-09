@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
-import { spawn, execSync } from 'child_process'
+import { execSync } from 'child_process'
 
 const BUNDLES_DIR = path.join(os.homedir(), '.clawpack', 'bundles')
 const CONFIG_FILE = path.join(os.homedir(), '.clawpack', 'config.json')
@@ -265,35 +265,26 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
   const sessionId = `clawpack-${Date.now()}`
 
   // 6. Send message via openclaw agent with --agent flag
-  const sendMessage = (message: string): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const args = ['agent', '--local', '--agent', agentId, '--session-id', sessionId, '-m', message, '--json']
-      if (opts.model) args.push('--model', opts.model)
+  const sendMessage = (message: string): string => {
+    const args = ['agent', '--local', '--agent', agentId, '--session-id', sessionId, '-m', message, '--json']
+    if (opts.model) args.push('--model', opts.model)
 
-      const escaped = args.map(a => `"${a.replace(/"/g, '\\"')}"`).join(' ')
+    const escaped = args.map(a => `"${a.replace(/"/g, '\\"')}"`).join(' ')
 
-      // Pause readline so child process doesn't interfere with stdin
-      rl.pause()
-
-      let stdout = ''
-      let stderr = ''
-      const child = spawn(`openclaw ${escaped}`, {
+    try {
+      const stdout = execSync(`openclaw ${escaped}`, {
+        encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: true,
-      } as any)
-      child.stdin!.end()
-      child.stdout!.on('data', (d: Buffer) => { stdout += d.toString() })
-      child.stderr!.on('data', (d: Buffer) => { stderr += d.toString() })
-      child.on('error', (err) => { rl.resume(); reject(err) })
-      child.on('close', (code) => {
-        rl.resume()
-        if (code !== 0 && !stdout.trim()) {
-          reject(new Error(stderr.trim() || `openclaw exited with code ${code}`))
-        } else {
-          resolve(parseResponse(stdout))
-        }
+        timeout: 120000,
       })
-    })
+      return parseResponse(stdout)
+    } catch (err: any) {
+      // execSync throws on non-zero exit, but stdout may still have the response
+      if (err.stdout && err.stdout.trim()) {
+        return parseResponse(err.stdout)
+      }
+      throw new Error(err.stderr?.trim() || err.message || 'openclaw command failed')
+    }
   }
 
   // 7. Format agent response with left border
@@ -341,7 +332,7 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
     }).start()
 
     try {
-      const response = await sendMessage(input)
+      const response = sendMessage(input)
       spinner.stop()
       console.log(formatResponse(response))
     } catch (err: any) {
