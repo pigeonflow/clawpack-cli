@@ -271,6 +271,10 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
 
     const escaped = args.map(a => `"${a.replace(/"/g, '\\"')}"`).join(' ')
 
+    // Pause readline before spawning child process — on Windows, execSync can
+    // interfere with the parent stdin stream causing readline to emit 'close',
+    // which would exit the chat after the first message.
+    rl.pause()
     try {
       const stdout = execSync(`openclaw ${escaped}`, {
         encoding: 'utf-8',
@@ -284,6 +288,8 @@ export async function startChat(ownerSlug: string, opts: { model?: string }) {
         return parseResponse(err.stdout)
       }
       throw new Error(err.stderr?.trim() || err.message || 'openclaw command failed')
+    } finally {
+      rl.resume()
     }
   }
 
